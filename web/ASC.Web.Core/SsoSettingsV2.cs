@@ -1,0 +1,505 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Studio.UserControls.Management.SingleSignOnSettings;
+
+/// <summary>
+/// The SSO portal settings.
+/// </summary>
+public class SsoSettingsV2 : ISettings<SsoSettingsV2>
+{
+    public static Guid ID => new("{1500187F-B8AB-406F-97B8-04BFE8261DBE}");
+
+    public const string SSO_SP_LOGIN_LABEL = "Single Sign-on";
+
+    public SsoSettingsV2 GetDefault()
+    {
+        return new SsoSettingsV2
+        {
+            EnableSso = false,
+
+            IdpSettings = new SsoIdpSettings
+            {
+                EntityId = string.Empty,
+                SsoUrl = string.Empty,
+                SsoBinding = SsoBindingType.Saml20HttpPost,
+                SloUrl = string.Empty,
+                SloBinding = SsoBindingType.Saml20HttpPost,
+                NameIdFormat = SsoNameIdFormatType.Saml20Transient
+            },
+
+            IdpCertificates = [],
+            IdpCertificateAdvanced = new SsoIdpCertificateAdvanced
+            {
+                DecryptAlgorithm = SsoEncryptAlgorithmType.AES_128,
+                DecryptAssertions = false,
+                VerifyAlgorithm = SsoSigningAlgorithmType.RSA_SHA1,
+                VerifyAuthResponsesSign = false,
+                VerifyLogoutRequestsSign = false,
+                VerifyLogoutResponsesSign = false
+            },
+
+            SpCertificates = [],
+            SpCertificateAdvanced = new SsoSpCertificateAdvanced
+            {
+                DecryptAlgorithm = SsoEncryptAlgorithmType.AES_128,
+                EncryptAlgorithm = SsoEncryptAlgorithmType.AES_128,
+                EncryptAssertions = false,
+                SigningAlgorithm = SsoSigningAlgorithmType.RSA_SHA1,
+                SignAuthRequests = false,
+                SignLogoutRequests = false,
+                SignLogoutResponses = false
+            },
+
+            FieldMapping = new SsoFieldMapping
+            {
+                FirstName = "givenName",
+                LastName = "sn",
+                Email = "mail",
+                Title = "title",
+                Location = "l",
+                Phone = "mobile"
+            },
+            SpLoginLabel = SSO_SP_LOGIN_LABEL,
+            HideAuthPage = false,
+            UsersType = (int)EmployeeType.User,
+            DisableEmailVerification = false
+        };
+    }
+    
+    /// <summary>
+    /// The timestamp indicating when the settings were last modified.
+    /// </summary>
+    /// <example>1990-01-01T00:00:00Z</example>
+    public DateTime LastModified { get; set; }
+
+    /// <summary>
+    /// Specifies if the SSO settings are enabled or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool? EnableSso { get; set; }
+
+    /// <summary>
+    /// The SSO IdP settings.
+    /// </summary>
+    /// <example>{"entityId": "", "ssoUrl": "", "ssoBinding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", "sloUrl": "", "sloBinding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", "nameIdFormat": "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"}</example>
+    public SsoIdpSettings IdpSettings { get; set; }
+
+    /// <summary>
+    /// The list of the IdP certificates.
+    /// </summary>
+    /// <example>[{"crt": "base64-cert-data", "key": "base64-key-data"}]</example>
+    public List<SsoCertificate> IdpCertificates { get; set; }
+
+    /// <summary>
+    /// The IdP advanced certificate.
+    /// </summary>
+    /// <example>{"verifyAlgorithm": "RSA_SHA1", "verifyAuthResponsesSign": false, "verifyLogoutRequestsSign": false, "verifyLogoutResponsesSign": false, "decryptAlgorithm": "AES_128", "decryptAssertions": false}</example>
+    public SsoIdpCertificateAdvanced IdpCertificateAdvanced { get; set; }
+
+    /// <summary>
+    /// The SP login label.
+    /// </summary>
+    /// <example>Single Sign-on</example>
+    public string SpLoginLabel { get; set; }
+
+    /// <summary>
+    /// The list of the SP certificates.
+    /// </summary>
+    /// <example>[{"crt": "base64-cert-data", "key": "base64-key-data"}]</example>
+    public List<SsoCertificate> SpCertificates { get; set; }
+
+    /// <summary>
+    /// The SP advanced certificate.
+    /// </summary>
+    /// <example>{"signingAlgorithm": "RSA_SHA1", "signAuthRequests": false, "signLogoutRequests": false, "signLogoutResponses": false, "encryptAlgorithm": "AES_128", "encryptAssertions": false, "decryptAlgorithm": "AES_128"}</example>
+    public SsoSpCertificateAdvanced SpCertificateAdvanced { get; set; }
+
+    /// <summary>
+    /// The SSO field mapping.
+    /// </summary>
+    /// <example>{"firstName": "givenName", "lastName": "sn", "email": "mail", "title": "title", "location": "l", "phone": "mobile"}</example>
+    public SsoFieldMapping FieldMapping { get; set; }
+
+    /// <summary>
+    /// Specifies if the authentication page will be hidden or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool HideAuthPage { get; set; }
+
+    /// <summary>
+    /// The user type.
+    /// </summary>
+    /// <example>1</example>
+    public int UsersType { get; set; }
+
+    /// <summary>
+    /// Specifies if the email verification is disabled or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool DisableEmailVerification { get; set; }
+}
+
+
+#region SpSettings
+
+/// <summary>
+/// The SSO IdP settings.
+/// </summary>
+public class SsoIdpSettings
+{
+    /// <summary>
+    /// The entity ID.
+    /// </summary>
+    /// <example>https://idp.company.com/saml</example>
+    public string EntityId { get; init; }
+
+    /// <summary>
+    /// The SSO URL.
+    /// </summary>
+    /// <example>https://idp.example.com/sso</example>
+    public string SsoUrl { get; init; }
+
+    /// <summary>
+    /// The SSO binding.
+    /// </summary>
+    /// <example>urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect</example>
+    public string SsoBinding { get; init; }
+
+    /// <summary>
+    /// The SLO URL.
+    /// </summary>
+    /// <example>https://idp.example.com/slo</example>
+    public string SloUrl { get; init; }
+
+    /// <summary>
+    /// The SLO binding.
+    /// </summary>
+    /// <example>urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect</example>
+    public string SloBinding { get; init; }
+
+    /// <summary>
+    /// The name ID format.
+    /// </summary>
+    /// <example>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</example>
+    public string NameIdFormat { get; set; }
+}
+
+#endregion
+
+
+#region FieldsMapping
+
+/// <summary>
+/// The SSO field mapping.
+/// </summary>
+/// <example>
+/// {
+///   "firstName": "givenName",
+///   "lastName": "sn",
+///   "email": "sn@example.com",
+///   "title": "SN",
+///   "location": "Location",
+///   "phone": "+14155552671"
+/// }
+/// </example>
+public class SsoFieldMapping
+{
+    /// <summary>
+    /// The first name.
+    /// </summary>
+    /// <example>givenName</example>
+    public string FirstName { get; init; }
+
+    /// <summary>
+    /// The last name.
+    /// </summary>
+    /// <example>sn</example>
+    public string LastName { get; init; }
+
+    /// <summary>
+    /// The email address.
+    /// </summary>
+    /// <example>sn@example.com</example>
+    [EmailAddress]
+    public string Email { get; init; }
+
+    /// <summary>
+    /// The title.
+    /// </summary>
+    /// <example>SN</example>
+    public string Title { get; set; }
+
+    /// <summary>
+    /// The location.
+    /// </summary>
+    /// <example>Location</example>
+    public string Location { get; set; }
+
+    /// <summary>
+    /// The phone number.
+    /// </summary>
+    /// <example>+14155552671</example>
+    public string Phone { get; set; }
+}
+
+#endregion
+
+
+#region Certificates
+
+
+/// <summary>
+/// The SSO certificate parameters.
+/// </summary>
+public class SsoCertificate
+{
+    /// <summary>
+    /// Specifies if a certificate is self-signed or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool SelfSigned { get; set; }
+
+    /// <summary>
+    /// The CRT certificate file.
+    /// </summary>
+    /// <example>crt file</example>
+    public string Crt { get; set; }
+
+    /// <summary>
+    /// The certificate key.
+    /// </summary>
+    /// <example>key</example>
+    public string Key { get; set; }
+
+    /// <summary>
+    /// The certificate action.
+    /// </summary>
+    /// <example>validate</example>
+    public string Action { get; set; }
+
+    /// <summary>
+    /// The certificate domain name.
+    /// </summary>
+    /// <example>example.com</example>
+    public string DomainName { get; set; }
+
+    /// <summary>
+    /// The certificate start date.
+    /// </summary>
+    /// <example>2024-01-01T00:00:00Z</example>
+    public DateTime StartDate { get; set; }
+
+    /// <summary>
+    /// The certificate expiration date.
+    /// </summary>
+    /// <example>2024-01-01T00:00:00Z</example>
+    public DateTime ExpiredDate { get; set; }
+}
+
+/// <summary>
+/// The IdP advanced certificate parameters.
+/// </summary>
+public class SsoIdpCertificateAdvanced
+{
+    /// <summary>
+    /// The certificate verification algorithm.
+    /// </summary>
+    /// <example>rsa-sha256</example>
+    public string VerifyAlgorithm { get; set; }
+
+    /// <summary>
+    /// Specifies if the signatures of the SAML authentication responses sent to SP will be verified or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool VerifyAuthResponsesSign { get; set; }
+
+    /// <summary>
+    /// Specifies if the signatures of the SAML logout requests sent to SP will be verified or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool VerifyLogoutRequestsSign { get; set; }
+
+    /// <summary>
+    /// Specifies if the signatures of the SAML logout responses sent to SP will be verified or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool VerifyLogoutResponsesSign { get; set; }
+
+    /// <summary>
+    /// The certificate decryption algorithm.
+    /// </summary>
+    /// <example>aes256-cbc</example>
+    public string DecryptAlgorithm { get; set; }
+
+    /// <summary>
+    /// Specifies if the assertions will be decrypted or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool DecryptAssertions { get; set; }
+}
+
+/// <summary>
+/// The SP advanced certificate parameters.
+/// </summary>
+public class SsoSpCertificateAdvanced
+{
+    /// <summary>
+    /// The certificate signing algorithm.
+    /// </summary>
+    /// <example>rsa-sha256</example>
+    public string SigningAlgorithm { get; set; }
+
+    /// <summary>
+    /// Specifies if SP will sign the SAML authentication requests sent to IdP or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool SignAuthRequests { get; set; }
+
+    /// <summary>
+    /// Specifies if SP will sign the SAML logout requests sent to IdP or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool SignLogoutRequests { get; set; }
+
+    /// <summary>
+    /// Specifies if SP will sign the SAML logout responses sent to IdP or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool SignLogoutResponses { get; set; }
+
+    /// <summary>
+    /// The certificate encryption algorithm.
+    /// </summary>
+    /// <example>aes256-cbc</example>
+    public string EncryptAlgorithm { get; set; }
+
+    /// <summary>
+    /// The certificate decryption algorithm.
+    /// </summary>
+    /// <example>aes256-cbc</example>
+    public string DecryptAlgorithm { get; set; }
+
+    /// <summary>
+    /// Specifies if the assertions will be encrypted or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool EncryptAssertions { get; set; }
+}
+
+#endregion
+
+
+#region Types
+
+public class SsoNameIdFormatType
+{
+    public const string Saml11Unspecified = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified";
+
+    public const string Saml11EmailAddress = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
+
+    public const string Saml20Entity = "urn:oasis:names:tc:SAML:2.0:nameid-format:entity";
+
+    public const string Saml20Transient = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient";
+
+    public const string Saml20Persistent = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent";
+
+    public const string Saml20Encrypted = "urn:oasis:names:tc:SAML:2.0:nameid-format:encrypted";
+
+    public const string Saml20Unspecified = "urn:oasis:names:tc:SAML:2.0:nameid-format:unspecified";
+
+    public const string Saml11X509SubjectName = "urn:oasis:names:tc:SAML:1.1:nameid-format:X509SubjectName";
+
+    public const string Saml11WindowsDomainQualifiedName = "urn:oasis:names:tc:SAML:1.1:nameid-format:WindowsDomainQualifiedName";
+
+    public const string Saml20Kerberos = "urn:oasis:names:tc:SAML:2.0:nameid-format:kerberos";
+}
+
+public class SsoBindingType
+{
+    public const string Saml20HttpPost = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST";
+
+    public const string Saml20HttpRedirect = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect";
+}
+
+public class SsoMetadata
+{
+    public const string BaseUrl = "";
+
+    public const string MetadataUrl = "/sso/metadata";
+
+    public const string EntityId = "/sso/metadata";
+
+    public const string ConsumerUrl = "/sso/acs";
+
+    public const string LogoutUrl = "/sso/slo/callback";
+
+}
+
+public class SsoSigningAlgorithmType
+{
+    public const string RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+
+    public const string RSA_SHA256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+
+    public const string RSA_SHA512 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512";
+}
+
+public class SsoEncryptAlgorithmType
+{
+    public const string AES_128 = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
+
+    public const string AES_256 = "http://www.w3.org/2001/04/xmlenc#aes256-cbc";
+
+    public const string TRI_DEC = "http://www.w3.org/2001/04/xmlenc#tripledes-cbc";
+}
+
+public class SsoSpCertificateActionType
+{
+    public const string Signing = "signing";
+
+    public const string Encrypt = "encrypt";
+
+    public const string SigningAndEncrypt = "signing and encrypt";
+}
+
+public class SsoIdpCertificateActionType
+{
+    public const string Verification = "verification";
+
+    public const string Decrypt = "decrypt";
+
+    public const string VerificationAndDecrypt = "verification and decrypt";
+}
+
+#endregion

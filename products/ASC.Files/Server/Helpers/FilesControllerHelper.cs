@@ -1,0 +1,281 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Helpers;
+
+[Scope]
+public class FilesControllerHelper(
+    IServiceProvider serviceProvider,
+        FilesSettingsHelper filesSettingsHelper,
+        FileUploader fileUploader,
+        SocketManager socketManager,
+        FileDtoHelper fileDtoHelper,
+        FileStorageService fileStorageService,
+        ILogger<FilesControllerHelper> logger,
+        FileConverter fileConverter,
+        PathProvider pathProvider,
+        FileChecker fileChecker,
+        FillingFormResultDtoHelper fillingFormResultDtoHelper,
+        FilesMessageService filesMessageService,
+        WebhookManager webhookManager,
+        IDaoFactory daoFactory,
+        IEventBus eventBus,
+        TenantManager tenantManager,
+        AuthContext authContext)
+    : FilesHelperBase(filesSettingsHelper,
+            fileUploader,
+            socketManager,
+            fileDtoHelper,
+            fileStorageService,
+            fileChecker,
+            filesMessageService,
+            webhookManager,
+            daoFactory,
+            eventBus,
+            tenantManager,
+            authContext)
+{
+    private readonly ILogger _logger = logger;
+
+    public async IAsyncEnumerable<FileDto<T>> ChangeHistoryAsync<T>(T fileId, int version, bool continueVersion)
+    {
+        var pair = await _fileStorageService.CompleteVersionAsync(fileId, version, continueVersion);
+        var history = pair.Value;
+
+        await foreach (var e in history)
+        {
+            yield return await _fileDtoHelper.GetAsync(e);
+        }
+    }
+
+    public async Task<bool> isFormPDF<T>(T fileId)
+    {
+        var file = await _fileStorageService.GetFileAsync(fileId, -1);
+        var fileType = FileUtility.GetFileTypeByFileName(file.Title);
+
+        if (fileType == FileType.Pdf)
+        {
+            return await _fileChecker.CheckExtendedPDF(file);
+        }
+        return false;
+    }
+
+    public async Task<string> GetPresignedUri<T>(T fileId)
+    {
+        var file = await _fileStorageService.GetFileAsync(fileId, -1);
+        return pathProvider.GetFileStreamUrl(file);
+    }
+
+    public async IAsyncEnumerable<ConversationResultDto> CheckConversionAsync<T>(CheckConversionRequestDto<T> checkConversionRequestDto)
+    {
+        var checkConversation = _fileStorageService.CheckConversionAsync([checkConversionRequestDto], checkConversionRequestDto.Sync);
+
+        await foreach (var r in checkConversation)
+        {
+            var o = new ConversationResultDto
+            {
+                Id = r.Id,
+                Error = r.Error,
+                OperationType = r.OperationType,
+                Processed = r.Processed,
+                Progress = r.Progress,
+                Source = r.Source
+            };
+
+            if (!string.IsNullOrEmpty(r.Result))
+            {
+                try
+                {
+                    var options = new JsonSerializerOptions
+                    {
+                        AllowTrailingCommas = true,
+                        PropertyNameCaseInsensitive = true
+                    };
+
+                    var jResult = JsonSerializer.Deserialize<FileJsonSerializerData<T>>(r.Result, options);
+                    o.File = await GetFileInfoAsync(jResult.Id, jResult.Version);
+                }
+                catch (Exception e)
+                {
+                    o.File = r.Result;
+                    _logger.ErrorCheckConversion(e);
+                }
+            }
+
+            yield return o;
+        }
+    }
+
+    public async Task<FileDto<T>> CreateFileAsync<T>(T folderId, string title, JsonElement templateId, int formId, bool enableExternalExt = false)
+    {
+        var file = templateId.ValueKind switch
+        {
+            JsonValueKind.Number => await _fileStorageService.CreateNewFileAsync(new FileModel<T, int> { ParentId = folderId, Title = title, TemplateId = templateId.GetInt32() }, enableExternalExt),
+            JsonValueKind.String => await _fileStorageService.CreateNewFileAsync(new FileModel<T, string> { ParentId = folderId, Title = title, TemplateId = templateId.GetString() }, enableExternalExt),
+            _ => await _fileStorageService.CreateNewFileAsync(new FileModel<T, int> { ParentId = folderId, Title = title, TemplateId = 0, FormId = formId }, enableExternalExt)
+        };
+
+        return await _fileDtoHelper.GetAsync(file);
+    }
+
+    public async Task<FileDto<T>> CreateHtmlFileAsync<T>(T folderId, string title, string content, bool updateIfExist)
+    {
+        return await CreateFileAsync(folderId, title, content, ".html", updateIfExist);
+    }
+
+    public async Task<FileDto<T>> CreateTextFileAsync<T>(T folderId, string title, string content, bool updateIfExist)
+    {
+        //Try detect content
+        var extension = ".txt";
+        if (!string.IsNullOrEmpty(content) && Regex.IsMatch(content, @"<([^\s>]*)(\s[^<]*)>"))
+        {
+            extension = ".html";
+        }
+
+        return await CreateFileAsync(folderId, title, content, extension, updateIfExist);
+    }
+
+    private async Task<FileDto<T>> CreateFileAsync<T>(T folderId, string title, string content, string extension, bool updateIfExist)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+
+        using var memStream = new MemoryStream(Encoding.UTF8.GetBytes(content));
+        var file = await _fileUploader.ExecAsync(folderId,
+                          title.EndsWith(extension, StringComparison.OrdinalIgnoreCase) ? title : title + extension,
+                          memStream.Length, memStream, updateIfExist);
+
+        return await _fileDtoHelper.GetAsync(file);
+    }
+
+
+    public async Task<FillingFormResultDto<T>> GetFillResultAsync<T>(T formId)
+    {
+        if (formId != null)
+        {
+            return await fillingFormResultDtoHelper.GetAsync(formId);
+        }
+        return null;
+    }
+
+    public IAsyncEnumerable<FileDto<T>> GetFileVersionInfoAsync<T>(T fileId)
+    {
+        return _fileStorageService.GetFileHistoryAsync(fileId).Select(async (File<T> e, CancellationToken _) => await _fileDtoHelper.GetAsync(e));
+    }
+
+    public async Task<FileDto<T>> LockFileAsync<T>(T fileId, bool lockFile)
+    {
+        var result = await _fileStorageService.LockFileAsync(fileId, lockFile);
+
+        return await _fileDtoHelper.GetAsync(result);
+    }
+
+
+    public IAsyncEnumerable<ConversationResultDto> StartConversionAsync<T>(CheckConversionRequestDto<T> cheqConversionRequestDto)
+    {
+        cheqConversionRequestDto.StartConvert = true;
+
+        return CheckConversionAsync(cheqConversionRequestDto);
+    }
+
+    public async Task<string> UpdateCommentAsync<T>(T fileId, int version, string comment)
+    {
+        return await _fileStorageService.UpdateCommentAsync(fileId, version, comment);
+    }
+
+    public async Task<FileDto<T>> UpdateFileAsync<T>(T fileId, string title, int lastVersion)
+    {
+        title = title?.Trim();
+        File<T> file = null;
+
+        if (!string.IsNullOrEmpty(title))
+        {
+            file = await _fileStorageService.FileRenameAsync(fileId, title);
+        }
+
+        if (lastVersion <= 0)
+        {
+            return await GetFileInfoAsync(file != null ? file.Id : fileId);
+        }
+
+        var result = await _fileStorageService.UpdateToVersionAsync(fileId, lastVersion);
+        file = result.Key;
+
+        return await GetFileInfoAsync(file.Id);
+    }
+
+    public async Task<FileDto<T>> SaveAsPdf<T>(T fileId, T folderId, string title)
+    {
+        try
+        {
+            var resultFile = await _fileStorageService.SaveAsPdf(fileId, folderId, title);
+            return await _fileDtoHelper.GetAsync(resultFile);
+        }
+        catch (FileNotFoundException e)
+        {
+            throw new ItemNotFoundException(FilesCommonResource.ErrorMessage_FileNotFound, e);
+        }
+    }
+
+    public async Task<FileDto<T>> UpdateFileStreamAsync<T>(Stream file, T fileId, string fileExtension, bool encrypted = false, bool forcesave = false)
+    {
+        try
+        {
+            var resultFile = await _fileStorageService.UpdateFileStreamAsync(fileId, file, fileExtension, encrypted, forcesave);
+
+            return await _fileDtoHelper.GetAsync(resultFile);
+        }
+        catch (FileNotFoundException e)
+        {
+            throw new ItemNotFoundException(FilesCommonResource.ErrorMessage_FileNotFound, e);
+        }
+    }
+
+    public async Task<FileDto<TTemplate>> CopyFileAsAsync<T, TTemplate>(T fileId, TTemplate destFolderId, string destTitle, string password = null, bool toForm = false)
+    {
+        var service = serviceProvider.GetService<FileStorageService>();
+        var file = await _fileStorageService.GetFileAsync(fileId, -1);
+        var ext = FileUtility.GetFileExtension(file.Title);
+        var destExt = FileUtility.GetFileExtension(destTitle);
+
+        if (ext == destExt)
+        {
+            var newFile = await service.CreateNewFileAsync(new FileModel<TTemplate, T> { ParentId = destFolderId, Title = destTitle, TemplateId = fileId }, true);
+
+            return await _fileDtoHelper.GetAsync(newFile);
+        }
+
+        await using var fileStream = await fileConverter.ExecAsync(file, destExt, password, toForm);
+        var controller = serviceProvider.GetService<FilesControllerHelper>();
+        return await controller.InsertFileAsync(destFolderId, fileStream, destTitle, true);
+    }
+}

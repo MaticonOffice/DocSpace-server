@@ -1,0 +1,700 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using System.Reflection;
+
+using ImageMagick;
+
+using UnknownImageFormatException = ASC.Web.Core.Users.UnknownImageFormatException;
+
+namespace ASC.Files.Core.VirtualRooms;
+
+[Scope]
+public class RoomLogoManager(
+    StorageFactory storageFactory,
+    TenantManager tenantManager,
+    IDaoFactory daoFactory,
+    FileSecurity fileSecurity,
+    ILogger<RoomLogoManager> logger,
+    FilesMessageService filesMessageService,
+    EmailValidationKeyProvider emailValidationKeyProvider,
+    SecurityContext securityContext,
+    FileUtilityConfiguration fileUtilityConfiguration,
+    SetupInfo setupInfo,
+    FileSizeComment fileSizeComment,
+    CommonLinkUtility commonLinkUtility,
+    ExternalShare externalShare,
+    WebhookManager webhookManager)
+{
+    internal const string LogosPathSplitter = "_";
+    private const string LogosPath = $"{{0}}{LogosPathSplitter}{{1}}.png";
+    private const string ImageWatermarkPath = $"{{0}}{LogosPathSplitter}watermark.png";
+    private const string LogoModuleName = "room_logos";
+    private const string TempDomainPath = "logos_temp";
+    private static readonly SemaphoreSlim _semaphore = new(1);
+
+    private static readonly (SizeName, IMagickGeometry) _originalLogoSize = (SizeName.Original, new MagickGeometry(1280, 1280));
+    private static readonly (SizeName, IMagickGeometry) _largeLogoSize = (SizeName.Large, new MagickGeometry(192, 192));
+    private static readonly (SizeName, IMagickGeometry) _mediumLogoSize = (SizeName.Medium, new MagickGeometry(64, 64));
+    private static readonly (SizeName, IMagickGeometry) _smallLogoSize = (SizeName.Small, new MagickGeometry(32, 32));
+
+    private IDataStore _logoStore;
+    public bool EnableAudit { get; set; } = true;
+
+    private async ValueTask<IDataStore> GetLogoStoreAsync()
+    {
+        if (_logoStore != null)
+        {
+            return _logoStore;
+        }
+
+        var tenantId = tenantManager.GetCurrentTenantId();
+        _logoStore = await storageFactory.GetStorageAsync(tenantId, LogoModuleName);
+        return _logoStore;
+    }
+
+    public async Task<Folder<T>> CreateAsync<T>(T id, string tempFile, int x, int y, uint width, uint height)
+    {
+        var folderDao = daoFactory.GetFolderDao<T>();
+        var room = await folderDao.GetFolderAsync(id);
+
+        if (room is not { IsRoom: true })
+        {
+            throw new ItemNotFoundException();
+        }
+
+        if (room.RootFolderType == FolderType.Archive || !await fileSecurity.CanEditRoomAsync(room))
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException_EditRoom);
+        }
+
+        if (string.IsNullOrEmpty(tempFile))
+        {
+            return room;
+        }
+
+        await SaveLogo(tempFile, x, y, width, height, room, folderDao);
+
+        await webhookManager.PublishAsync(
+            room.IsAgent
+                ? WebhookTrigger.AgentUpdated
+                : WebhookTrigger.RoomUpdated,
+            room);
+
+        return room;
+    }
+
+    public async Task SaveLogo<T>(string tempFile, int x, int y, uint width, uint height, Folder<T> room, IFolderDao<T> folderDao)
+    {
+        var store = await GetLogoStoreAsync();
+        var fileName = Path.GetFileName(tempFile);
+        var data = await GetTempAsync(store, fileName);
+
+        var stringId = GetId(room);
+
+        await SaveWithProcessAsync(store, stringId, data, -1, new Point(x, y), new MagickGeometry(width, height));
+        await RemoveTempAsync(store, fileName);
+
+        room.SettingsHasLogo = true;
+
+        await SaveRoomAsync(folderDao, room);
+
+        if (EnableAudit)
+        {
+            await filesMessageService.SendAsync(MessageAction.RoomLogoCreated, room, room.Title);
+        }
+    }
+
+    public async Task<string> CreateWatermarkImageAsync<T>(Folder<T> room, string imageUrl)
+    {
+        var store = await GetLogoStoreAsync();
+        var fileName = Path.GetFileName(imageUrl);
+        var data = await GetTempAsync(store, fileName);
+
+        var uri = await CreateWatermarkImageAsync(room, store, data);
+
+        await RemoveTempAsync(store, fileName);
+
+        return uri;
+    }
+
+
+    private async Task<string> CreateWatermarkImageAsync<T>(Folder<T> room, IDataStore store, byte[] data)
+    {
+        if (data == null)
+        {
+            return null;
+        }
+
+        var stringId = GetId(room);
+
+        await SaveWatermarkImageAsync(store, stringId, data, -1);
+
+        var uri = await GetWatermarkImageAsync(room);
+
+        return commonLinkUtility.GetFullAbsolutePath(uri);
+    }
+
+    public async Task<Folder<T>> DeleteWatermarkImageAsync<T>(Folder<T> room)
+    {
+        var stringId = GetId(room);
+
+        try
+        {
+            var store = await GetLogoStoreAsync();
+            await store.DeleteFilesAsync(string.Empty, string.Format(ImageWatermarkPath, ProcessFolderId(stringId)), false);
+        }
+        catch (Exception e)
+        {
+            logger.ErrorRemoveRoomLogo(e);
+        }
+
+        return room;
+    }
+    public async Task<Folder<T>> DeleteAsync<T>(T id, bool checkPermissions = true)
+    {
+        var folderDao = daoFactory.GetFolderDao<T>();
+        var room = await folderDao.GetFolderAsync(id);
+
+        if (room is not { IsRoom: true })
+        {
+            throw new ItemNotFoundException();
+        }
+
+        if (!room.SettingsHasLogo)
+        {
+            return room;
+        }
+
+        if (checkPermissions && !await fileSecurity.CanEditRoomAsync(room))
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException_EditRoom);
+        }
+
+        var stringId = GetId(room);
+
+        try
+        {
+            var store = await GetLogoStoreAsync();
+            await store.DeleteFilesAsync(string.Empty, $"{ProcessFolderId(stringId)}*.*", false);
+            room.SettingsHasLogo = false;
+
+            await SaveRoomAsync(folderDao, room);
+
+            if (EnableAudit)
+            {
+                await filesMessageService.SendAsync(MessageAction.RoomLogoDeleted, room, room.Title);
+                await webhookManager.PublishAsync(room.IsAgent ? WebhookTrigger.AgentUpdated : WebhookTrigger.RoomUpdated, room);
+            }
+        }
+        catch (Exception e)
+        {
+            logger.ErrorRemoveRoomLogo(e);
+        }
+
+        return room;
+    }
+
+    public async ValueTask<Logo> GetLogoAsync<T>(Folder<T> room)
+    {
+        if (!room.SettingsHasLogo)
+        {
+            if (string.IsNullOrEmpty(room.SettingsColor))
+            {
+                room.SettingsColor = GetRandomColour();
+
+                await SaveRoomAsync(daoFactory.GetFolderDao<T>(), room);
+            }
+
+            LogoCover cover = null;
+            if (!string.IsNullOrEmpty(room.SettingsCover) && (await GetCoversAsync()).TryGetValue(room.SettingsCover, out var fromDict))
+            {
+                cover = new LogoCover
+                {
+                    Id = room.SettingsCover,
+                    Data = fromDict
+                };
+            }
+
+            return new Logo
+            {
+                Original = string.Empty,
+                Large = string.Empty,
+                Medium = string.Empty,
+                Small = string.Empty,
+                Color = room.SettingsColor,
+                Cover = cover
+            };
+        }
+
+        var id = GetId(room);
+
+        var cacheKey = Math.Abs(room.ModifiedOn.GetHashCode());
+        var secure = !securityContext.IsAuthenticated;
+        var store = await GetLogoStoreAsync();
+
+        return new Logo
+        {
+            Original = await GetLogoPathAsync(store, id, SizeName.Original, cacheKey, secure),
+            Large = await GetLogoPathAsync(store, id, SizeName.Large, cacheKey, secure),
+            Medium = await GetLogoPathAsync(store, id, SizeName.Medium, cacheKey, secure),
+            Small = await GetLogoPathAsync(store, id, SizeName.Small, cacheKey, secure)
+        };
+    }
+    public async ValueTask<string> GetWatermarkImageAsync<T>(Folder<T> room)
+    {
+        var id = GetId(room);
+
+        var cacheKey = Math.Abs(room.ModifiedOn.GetHashCode());
+
+        return await GetWatermarkImagePathAsync(id, cacheKey, true);
+    }
+
+    public async Task<string> SaveTempAsync(IFormFile roomLogo)
+    {
+        var maxFileSize = setupInfo.MaxImageUploadSize;
+        if (roomLogo.Length > maxFileSize)
+        {
+            throw new Exception(fileSizeComment.FileImageSizeExceptionString);
+        }
+
+        byte[] data;
+        await using (var inputStream = roomLogo.OpenReadStream())
+        using (var ms = new MemoryStream())
+        {
+            await inputStream.CopyToAsync(ms);
+            data = ms.ToArray();
+        }
+
+        UserPhotoThumbnailManager.CheckImgFormat(data);
+
+        data = await UserPhotoThumbnailManager.TryParseImage(data, maxFileSize, _originalLogoSize.Item2);
+
+        var fileName = $"{Guid.NewGuid()}{LogosPathSplitter}{securityContext.CurrentAccount.ID}.png";
+
+        using var stream = new MemoryStream(data);
+        var store = await GetLogoStoreAsync();
+        var path = await store.SaveAsync(TempDomainPath, fileName, stream);
+
+        var pathAsString = path.ToString();
+
+        var pathWithoutQuery = pathAsString;
+
+        if (pathAsString.IndexOf('?') > 0)
+        {
+            pathWithoutQuery = pathAsString[..pathAsString.IndexOf('?')];
+        }
+
+        return pathWithoutQuery;
+    }
+
+    public async Task<bool> CopyAsync<TFrom, TTo>(Folder<TFrom> from, Folder<TTo> to)
+    {
+        if (!from.SettingsHasLogo)
+        {
+            return false;
+        }
+
+        var storage = await GetLogoStoreAsync();
+
+        foreach (var size in Enum.GetValues<SizeName>())
+        {
+            var fileNameFrom = GetFileName(from.Id, size);
+            var fileNameTo = GetFileName(to.Id, size);
+            await storage.CopyAsync(fileNameFrom, string.Empty, fileNameTo);
+        }
+
+        return true;
+    }
+
+    private static readonly ConcurrentDictionary<string, string> _covers = new();
+    private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _coversBySize = new();
+    public static async Task<ConcurrentDictionary<string, string>> GetCoversAsync()
+    {
+        var coversBySize = await GetCoversBySizeAsync();
+
+        foreach (var (icon, sizes) in coversBySize)
+        {
+            if (sizes.TryGetValue("default", out var svg))
+            {
+                _covers.TryAdd(icon, svg);
+            }
+        }
+
+        return _covers;
+    }
+
+    public static async Task ValidateRoomCover(string icon)
+    {
+        var covers = await GetCoversAsync();
+        if (icon != "" && !covers.ContainsKey(icon))
+        {
+            throw new ArgumentException(null, nameof(icon));
+        }
+    }
+
+    public static async Task<ConcurrentDictionary<string, ConcurrentDictionary<string, string>>> GetCoversBySizeAsync()
+    {
+        try
+        {
+            await _semaphore.WaitAsync();
+
+            if (_coversBySize.IsEmpty)
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                var assemblyName = assembly.GetName().Name;
+                var coversRoot = $"{assemblyName}.Covers.";
+
+                foreach (var res in assembly.GetManifestResourceNames()
+                             .Where(r => r.StartsWith(coversRoot)))
+                {
+                    var relative = res.Substring(coversRoot.Length);
+                    var parts = relative.Split('.');
+
+                    if (parts.Length < 3)
+                    {
+                        continue;
+                    }
+                    var size = parts[0];
+                    var iconName = parts[1];
+
+                    await using var stream = assembly.GetManifestResourceStream(res);
+                    if (stream == null)
+                    {
+                        continue;
+                    }
+
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms);
+                    var svg = Encoding.UTF8.GetString(ms.ToArray());
+
+                    var sizes = _coversBySize.GetOrAdd(
+                        iconName,
+                        _ => new ConcurrentDictionary<string, string>()
+                    );
+
+                    sizes[size] = svg;
+                }
+            }
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+
+        return _coversBySize;
+    }
+
+    public async Task<Folder<T>> ChangeCoverAsync<T>(T id, string color, string cover)
+    {
+        var folderDao = daoFactory.GetFolderDao<T>();
+        var room = await folderDao.GetFolderAsync(id);
+        if (room is not { IsRoom: true })
+        {
+            throw new ItemNotFoundException();
+        }
+
+        if (room.RootFolderType == FolderType.Archive || !await fileSecurity.CanEditRoomAsync(room))
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException_EditRoom);
+        }
+
+        var colorChanged = ColorChanged(color, room);
+
+        var coverChanged = await CoverChanged(cover, room);
+
+        if (colorChanged || coverChanged)
+        {
+            await SaveRoomAsync(folderDao, room);
+
+            if (EnableAudit)
+            {
+                if (colorChanged)
+                {
+                    await filesMessageService.SendAsync(MessageAction.RoomColorChanged, room, room.Title);
+                }
+
+                if (coverChanged)
+                {
+                    await filesMessageService.SendAsync(MessageAction.RoomCoverChanged, room, room.Title);
+                }
+
+                await webhookManager.PublishAsync(room.IsAgent ? WebhookTrigger.AgentUpdated : WebhookTrigger.RoomUpdated, room);
+            }
+        }
+
+        return room;
+    }
+
+    public static bool ColorChanged<T>(string color, Folder<T> room)
+    {
+        var colorChanged = false;
+
+        if (color != null && room.SettingsColor != color)
+        {
+            // if (color != "" && !Color.TryParse(color, out _))
+            // {
+            //     throw new ArgumentException(null, nameof(color));
+            // }
+
+            room.SettingsColor = color == "" ? null : color;
+            colorChanged = true;
+        }
+
+        return colorChanged;
+    }
+
+    public static async Task<bool> CoverChanged<T>(string cover, Folder<T> room)
+    {
+        var coverChanged = false;
+
+        if (cover != null && room.SettingsCover != cover)
+        {
+            await ValidateRoomCover(cover);
+
+            room.SettingsCover = cover == "" ? null : cover;
+            coverChanged = true;
+        }
+
+        return coverChanged;
+    }
+
+    internal string GetRandomColour()
+    {
+        var rand = new Random();
+        var color = fileUtilityConfiguration.LogoColors[rand.Next(fileUtilityConfiguration.LogoColors.Count - 1)];
+        var result = MagickColor.FromRgba(color.R, color.G, color.B, 1).ToHexString().Replace("#", string.Empty);
+        return result[..^2];//without opacity
+    }
+
+    private async Task RemoveTempAsync(IDataStore store, string fileName)
+    {
+        var index = fileName.LastIndexOf('.');
+        var fileNameWithoutExt = index != -1 ? fileName[..index] : fileName;
+
+        try
+        {
+            await store.DeleteFilesAsync(TempDomainPath, "", fileNameWithoutExt + "*.*", false);
+        }
+        catch (Exception e)
+        {
+            logger.ErrorRemoveTempPhoto(e);
+        }
+    }
+
+    private async Task SaveWithProcessAsync(IDataStore store, string id, byte[] imageData, long maxFileSize, Point position, MagickGeometry cropSize)
+    {
+        imageData = await UserPhotoThumbnailManager.TryParseImage(imageData, maxFileSize, _originalLogoSize.Item2);
+
+        var fileName = GetFileName(id, SizeName.Original);
+
+        if (imageData == null || imageData.Length == 0)
+        {
+            return;
+        }
+
+        using (var stream = new MemoryStream(imageData))
+        {
+            await store.SaveAsync(fileName, stream);
+        }
+
+        var sizes = new[] { _mediumLogoSize, _smallLogoSize, _largeLogoSize };
+
+        if (imageData is not { Length: > 0 })
+        {
+            throw new UnknownImageFormatException();
+        }
+        if (maxFileSize != -1 && imageData.Length > maxFileSize)
+        {
+            throw new ImageWeightLimitException();
+        }
+
+        try
+        {
+            using var imageStream = new MemoryStream(imageData);
+            using var img = new MagickImage(imageStream);
+            foreach (var size in sizes)
+            {
+                if (size.Item2.Width != img.Width || size.Item2.Height != img.Height)
+                {
+                    using var img2 = UserPhotoThumbnailManager.GetImage(img, size.Item2, new UserPhotoThumbnailSettings(position, cropSize));
+                    imageData = await CommonPhotoManager.SaveToBytes(img2);
+                }
+                else
+                {
+                    imageData = await CommonPhotoManager.SaveToBytes(img);
+                }
+
+                var imageFileName = string.Format(LogosPath, ProcessFolderId(id), size.Item1.ToStringLowerFast());
+
+                using var stream2 = new MemoryStream(imageData);
+                await store.SaveAsync(imageFileName, stream2);
+            }
+        }
+        catch (ArgumentException error)
+        {
+            throw new UnknownImageFormatException(error);
+        }
+    }
+    private async Task SaveWatermarkImageAsync(IDataStore store, string id, byte[] imageData, long maxFileSize)
+    {
+        imageData = await UserPhotoThumbnailManager.TryParseImage(imageData, maxFileSize, _originalLogoSize.Item2);
+
+        var fileName = string.Format(ImageWatermarkPath, ProcessFolderId(id));
+
+        if (imageData == null || imageData.Length == 0)
+        {
+            return;
+        }
+        if (maxFileSize != -1 && imageData.Length > maxFileSize)
+        {
+            throw new ImageWeightLimitException();
+        }
+
+        using var stream = new MemoryStream(imageData);
+        await store.SaveAsync(fileName, stream);
+    }
+
+    private async ValueTask<string> GetWatermarkImagePathAsync<T>(T id, int hash, bool secure = false)
+    {
+        var fileName = string.Format(ImageWatermarkPath, ProcessFolderId(id));
+        var headers = secure ? new[] { SecureHelper.GenerateSecureKeyHeader(fileName, emailValidationKeyProvider) } : null;
+
+        var store = await GetLogoStoreAsync();
+
+        var uri = await store.GetPreSignedUriAsync(string.Empty, fileName, TimeSpan.MaxValue, headers);
+
+        return uri + (secure ? "&" : "?") + $"hash={hash}";
+    }
+
+    private async ValueTask<string> GetLogoPathAsync<T>(IDataStore store, T id, SizeName size, int hash, bool secure = false)
+    {
+        var fileName = GetFileName(id, size);
+        var headers = secure ? new[] { SecureHelper.GenerateSecureKeyHeader(fileName, emailValidationKeyProvider) } : null;
+
+        var uri = await store.GetPreSignedUriAsync(string.Empty, fileName, TimeSpan.MaxValue, headers);
+
+        return externalShare.GetUrlWithShare(uri + (secure ? "&" : "?") + $"hash={hash}");
+    }
+
+    private static string GetFileName<T>(T id, SizeName size)
+    {
+        var fileName = string.Format(LogosPath, ProcessFolderId(id), size.ToStringLowerFast());
+        return fileName;
+    }
+
+    private async Task<byte[]> GetTempAsync(IDataStore store, string fileName)
+    {
+        var index = fileName.LastIndexOf('.');
+        var fileNameWithoutExt = index != -1 ? fileName[..index] : fileName;
+
+        var fileNameParts = fileNameWithoutExt.Split(LogosPathSplitter);
+
+        var userIdString = fileNameParts.Length > 1 ? fileNameParts[1] : string.Empty;
+        if (!Guid.TryParse(userIdString, out var userId) || userId != securityContext.CurrentAccount.ID)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        await using var stream = await store.GetReadStreamAsync(TempDomainPath, fileName);
+
+        var data = await ReadStreamToByteArrayAsync(stream);
+
+        return data;
+    }
+
+    private static async Task<byte[]> ReadStreamToByteArrayAsync(Stream inputStream)
+    {
+        if (inputStream == null)
+        {
+            return null;
+        }
+
+        await using (inputStream)
+        {
+            using var memoryStream = new MemoryStream();
+            await inputStream.CopyToAsync(memoryStream);
+            return memoryStream.ToArray();
+        }
+    }
+
+    private async Task SaveRoomAsync<T>(IFolderDao<T> folderDao, Folder<T> room)
+    {
+        if (room.ProviderEntry)
+        {
+            var provider = await daoFactory.ProviderDao.UpdateRoomProviderInfoAsync(new ProviderData
+            {
+                Id = room.ProviderId,
+                HasLogo = room.SettingsHasLogo,
+                Color = room.SettingsColor,
+                Cover = room.SettingsCover
+            });
+
+            room.ModifiedOn = provider.ModifiedOn;
+        }
+        else
+        {
+            await folderDao.SaveFolderAsync(room);
+        }
+    }
+
+    private static string ProcessFolderId<T>(T id)
+    {
+        ArgumentNullException.ThrowIfNull(id);
+
+        return id.GetType() != typeof(string)
+            ? id.ToString()
+            : id.ToString()?.Replace("|", "");
+    }
+
+    private static string GetId<T>(Folder<T> room)
+    {
+        if (!room.MutableId)
+        {
+            return room.Id.ToString();
+        }
+
+        var match = Selectors.Pattern.Match(room.Id.ToString()!);
+
+        return $"{match.Groups["selector"]}-{match.Groups["id"]}";
+    }
+}
+
+[EnumExtensions]
+public enum SizeName
+{
+    Original = 0,
+    Large = 1,
+    Medium = 2,
+    Small = 3
+}

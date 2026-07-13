@@ -1,0 +1,693 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using System.Diagnostics;
+
+using ASC.Api.Core.Cors;
+using ASC.Api.Core.Cors.Enums;
+using ASC.MessagingSystem;
+
+using Asp.Versioning;
+
+using Flurl.Util;
+
+using Microsoft.AspNetCore.Cors.Infrastructure;
+
+using IPNetwork = System.Net.IPNetwork;
+
+namespace ASC.Api.Core;
+
+public abstract class BaseStartup
+{
+    private const string BasicAuthScheme = "Basic";
+    private const string MultiAuthSchemes = "MultiAuthSchemes";
+
+    protected readonly IConfiguration _configuration;
+    private readonly string _corsOrigin;
+    private static readonly JsonSerializerOptions _serializerOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private protected DIHelper DIHelper { get; }
+
+    protected bool OpenApiEnabled { get; init; }
+
+    private bool OpenTelemetryEnabled { get; }
+
+    protected BaseStartup(IConfiguration configuration)
+    {
+        _configuration = configuration;
+
+        _corsOrigin = _configuration["core:cors"];
+
+        DIHelper = new DIHelper();
+        OpenApiEnabled = _configuration.GetValue<bool>("openApi:enable");
+        OpenTelemetryEnabled = _configuration.GetValue<bool>("openTelemetry:enable");
+    }
+
+    public virtual async Task ConfigureServices(WebApplicationBuilder builder)
+    {
+        var services = builder.Services;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            AppContext.SetSwitch("System.Net.Security.UseManagedNtlm", true);
+        }
+
+        services.AddCustomHealthCheck(_configuration);
+        services.AddHttpContextAccessor();
+        services.AddMemoryCache();
+
+        services.AddHttpClient();
+        services.AddHttpClient("customHttpClient", _ => { })
+            .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false
+            });
+        services.AddHttpClient("customHttpClientSslIgnore", _ => { })
+            .ConfigurePrimaryHttpMessageHandler(_ =>
+            {
+                var handler = new SocketsHttpHandler { AllowAutoRedirect = false };
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                return handler;
+            });
+        services.AddHttpClient("customHttpClientNoCookie", _ => { })
+            .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
+            {
+                UseCookies = false
+            });
+        services.AddHttpClient(UrlValidator.PinnedHttpClient)
+            .SetHandlerLifetime(TimeSpan.FromMinutes(5))
+            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(10))
+            .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = UrlValidator.PinnedConnectCallback
+            });
+        services.AddHttpClient(UrlValidator.PinnedHttpClientSslIgnore)
+            .SetHandlerLifetime(TimeSpan.FromMinutes(5))
+            .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(10))
+            .ConfigurePrimaryHttpMessageHandler(_ =>
+            {
+                var handler = new SocketsHttpHandler
+                {
+                    AllowAutoRedirect = false,
+                    ConnectCallback = UrlValidator.PinnedConnectCallback
+                };
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                return handler;
+            });
+
+
+        services.AddExceptionHandler<CustomExceptionHandler>();
+        services.AddProblemDetails();
+
+        services.AddApiVersioning(options =>
+        {
+            options.DefaultApiVersion = new ApiVersion(2, 0);
+            options.ApiVersionReader = new UrlSegmentApiVersionReader();
+            options.AssumeDefaultVersionWhenUnspecified = true;
+            options.ReportApiVersions = true;
+        }).AddMvc()
+        .AddApiExplorer(options =>
+        {
+            options.GroupNameFormat = "VV";
+            options.SubstitutionFormat = "VV";
+            options.AssumeDefaultVersionWhenUnspecified = true;
+            options.SubstituteApiVersionInUrl = true;
+            options.DefaultApiVersion = new ApiVersion(2, 0);
+        });
+
+        services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+            options.ForwardLimit = null;
+            options.KnownIPNetworks.Clear();
+            options.KnownProxies.Clear();
+
+            var knownProxies = _configuration.GetSection("core:hosting:forwardedHeadersOptions:knownProxies").Get<List<string>>();
+            var knownNetworks = _configuration.GetSection("core:hosting:forwardedHeadersOptions:knownNetworks").Get<List<string>>();
+            var allowedHosts = _configuration.GetSection("core:hosting:forwardedHeadersOptions:allowedHosts").Get<List<string>>();
+
+            if (allowedHosts is { Count: > 0 })
+            {
+                options.AllowedHosts = allowedHosts;
+            }
+
+            if (knownProxies is { Count: > 0 })
+            {
+                foreach (var knownProxy in knownProxies)
+                {
+                    options.KnownProxies.Add(IPAddress.Parse(knownProxy));
+                }
+            }
+
+
+            if (knownNetworks is { Count: > 0 })
+            {
+                foreach (var knownNetwork in knownNetworks)
+                {
+                    var prefix = IPAddress.Parse(knownNetwork.Split("/")[0]);
+                    var prefixLength = Convert.ToInt32(knownNetwork.Split("/")[1]);
+
+                    options.KnownIPNetworks.Add(new IPNetwork(prefix, prefixLength));
+                }
+            }
+        });
+
+        var connectionMultiplexer = await services.GetRedisConnectionMultiplexerAsync(_configuration, GetType().Namespace);
+
+        var rateLimiterSettingsSection = _configuration.GetSection("core:hosting:rateLimiterOptions");
+        var rateLimiterSettings = rateLimiterSettingsSection.Get<RateLimiterSettings>();
+        builder.Services.Configure<RateLimiterSettings>(rateLimiterSettingsSection);
+
+        services.AddRateLimiter(options =>
+        {
+            bool EnableNoLimiter(IPAddress address)
+            {
+                var knownNetworks = _configuration.GetSection("core:hosting:rateLimiterOptions:knownNetworks").Get<List<string>>();
+                var knownIPAddresses = _configuration.GetSection("core:hosting:rateLimiterOptions:knownIPAddresses").Get<List<string>>();
+
+                if (knownIPAddresses is { Count: > 0 })
+                {
+                    foreach (var knownIPAddress in knownIPAddresses)
+                    {
+                        if (IPAddress.Parse(knownIPAddress).Equals(address))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                if (knownNetworks is { Count: > 0 })
+                {
+                    foreach (var knownNetwork in knownNetworks)
+                    {
+                        var prefix = IPAddress.Parse(knownNetwork.Split("/")[0]);
+                        var prefixLength = Convert.ToInt32(knownNetwork.Split("/")[1]);
+                        var ipNetwork = new IPNetwork(prefix, prefixLength);
+
+                        if (ipNetwork.Contains(address))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+
+            options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
+                PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+                {
+                    var userId = httpContext?.User.Claims.FirstOrDefault(x => x.Type == ClaimTypes.Sid)?.Value ??
+                                 httpContext?.Connection.RemoteIpAddress.ToInvariantString();
+
+                    var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                    if (EnableNoLimiter(remoteIpAddress))
+                    {
+                        return RateLimitPartition.GetNoLimiter("no_limiter");
+                    }
+
+                    userId ??= remoteIpAddress.ToInvariantString();
+
+                    var permitLimit = rateLimiterSettings.SlidingWindowLimit;
+
+                    var partitionKey = $"sw_{userId}";
+
+                    return RedisRateLimitPartition.GetSlidingWindowRateLimiter(partitionKey, _ => new RedisSlidingWindowRateLimiterOptions { PermitLimit = permitLimit, Window = TimeSpan.FromMinutes(1), ConnectionMultiplexerFactory = () => connectionMultiplexer });
+                }),
+                PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+                {
+                    var userId = httpContext?.User.Claims.FirstOrDefault(x => x.Type == ClaimTypes.Sid)?.Value;
+                    string partitionKey;
+                    int permitLimit;
+
+                    var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                    if (EnableNoLimiter(remoteIpAddress))
+                    {
+                        return RateLimitPartition.GetNoLimiter("no_limiter");
+                    }
+
+                    userId ??= remoteIpAddress.ToInvariantString();
+
+                    if (string.Compare(httpContext?.Request.Method, "GET", StringComparison.OrdinalIgnoreCase) == 0)
+                    {
+                        permitLimit = rateLimiterSettings.ConcurrentGetLimit;
+                        partitionKey = $"cr_read_{userId}";
+                    }
+                    else
+                    {
+                        permitLimit = rateLimiterSettings.DefaultConcurrencyWriteRequests;
+
+                        partitionKey = $"cr_write_{userId}";
+                    }
+
+                    return RedisRateLimitPartition.GetConcurrencyRateLimiter(partitionKey, _ => new RedisConcurrencyRateLimiterOptions { PermitLimit = permitLimit, QueueLimit = 0, ConnectionMultiplexerFactory = () => connectionMultiplexer });
+                }),
+                PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+                    {
+                        var userId = httpContext?.User.Claims.FirstOrDefault(x => x.Type == ClaimTypes.Sid)?.Value ??
+                                     httpContext?.Connection.RemoteIpAddress.ToInvariantString();
+
+                        var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                        if (EnableNoLimiter(remoteIpAddress))
+                        {
+                            return RateLimitPartition.GetNoLimiter("no_limiter");
+                        }
+
+                        userId ??= remoteIpAddress.ToInvariantString();
+
+                        var partitionKey = $"fw_post_put_{userId}";
+                        var permitLimit = rateLimiterSettings.DailyWriteLimit;
+
+                        if (!(string.Compare(httpContext?.Request.Method, "POST", StringComparison.OrdinalIgnoreCase) == 0 ||
+                              string.Compare(httpContext?.Request.Method, "PUT", StringComparison.OrdinalIgnoreCase) == 0))
+                        {
+                            return RateLimitPartition.GetNoLimiter("no_limiter");
+                        }
+
+                        return RedisRateLimitPartition.GetFixedWindowRateLimiter(partitionKey, _ => new RedisFixedWindowRateLimiterOptions { PermitLimit = permitLimit, Window = TimeSpan.FromDays(1), ConnectionMultiplexerFactory = () => connectionMultiplexer });
+                    }
+                ));
+
+            options.AddPolicy(RateLimiterPolicy.SensitiveApi, httpContext =>
+            {
+                var userId = httpContext?.User.Claims.FirstOrDefault(x => x.Type == ClaimTypes.Sid)?.Value ??
+                             httpContext?.Connection.RemoteIpAddress.ToInvariantString();
+
+                var permitLimit = rateLimiterSettings.SensitiveApiLimit;
+                var path = httpContext?.Request.Path.ToString();
+                var partitionKey = $"{RateLimiterPolicy.SensitiveApi}_{userId}|{path}";
+                var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                if (EnableNoLimiter(remoteIpAddress))
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                return RedisRateLimitPartition.GetSlidingWindowRateLimiter(partitionKey, _ => new RedisSlidingWindowRateLimiterOptions { PermitLimit = permitLimit, Window = TimeSpan.FromMinutes(rateLimiterSettings.SensitiveApiWindowMinutes), ConnectionMultiplexerFactory = () => connectionMultiplexer });
+            });
+
+            options.AddPolicy(RateLimiterPolicy.EmailInvitationApi, httpContext =>
+            {
+                var invitationLimitPerDay = rateLimiterSettings.MaxEmailInvitationsPerDay;
+                if (invitationLimitPerDay is null)
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                if (EnableNoLimiter(remoteIpAddress))
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                var tenantManager = httpContext.RequestServices.GetRequiredService<TenantManager>();
+                var tenant = tenantManager.GetCurrentTenant(false);
+
+                if (tenant == null)
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                var invitationsCount = 0;
+
+                if (httpContext.Request.ContentLength > 0)
+                {
+                    if (!httpContext.Request.Body.CanSeek)
+                    {
+                        httpContext.Request.EnableBuffering();
+                    }
+
+                    httpContext.Request.Body.Position = 0;
+
+                    using var bodyReader = new StreamReader(httpContext.Request.Body, leaveOpen: true);
+                    var json = bodyReader.ReadToEndAsync().Result?.Trim();
+
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(json))
+                        {
+                            var userInvitationsDto = JsonSerializer.Deserialize<EmailInvitationsDto>(json, _serializerOptions);
+
+                            if (userInvitationsDto?.Invitations != null)
+                            {
+                                invitationsCount = userInvitationsDto.Invitations.Count(x => !string.IsNullOrEmpty(x.Email));
+                            }
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Invalid JSON in request body, treat as 0 invitations
+                    }
+
+                    httpContext.Request.Body.Position = 0;
+                }
+
+                if (invitationsCount == 0)
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                var partitionKey = $"{RateLimiterPolicy.EmailInvitationApi}_{tenant.Id}";
+
+                RedisFixedWindowRateLimiterOptions OptionFactory() => new() { PermitLimit = invitationLimitPerDay.Value, Window = TimeSpan.FromDays(1), ConnectionMultiplexerFactory = () => connectionMultiplexer };
+
+                RateLimiter LimitterFactory(string key) => new LooppedRedisFixedWindowRateLimiter<string>(key, OptionFactory(), invitationsCount);
+
+                return RateLimitPartition.Get(partitionKey, LimitterFactory);
+            });
+
+            options.AddPolicy(RateLimiterPolicy.PaymentsApi, httpContext =>
+            {
+                var userId = httpContext?.User.Claims.FirstOrDefault(x => x.Type == ClaimTypes.Sid)?.Value ??
+                             httpContext?.Connection.RemoteIpAddress.ToInvariantString();
+
+                var permitLimit = rateLimiterSettings.PaymentsApiLimit;
+                var path = httpContext?.Request.Path.ToString();
+                var partitionKey = $"{RateLimiterPolicy.PaymentsApi}_{userId}|{path}";
+                var remoteIpAddress = httpContext?.Connection.RemoteIpAddress;
+
+                if (EnableNoLimiter(remoteIpAddress))
+                {
+                    return RateLimitPartition.GetNoLimiter("no_limiter");
+                }
+
+                return RedisRateLimitPartition.GetSlidingWindowRateLimiter(partitionKey, _ => new RedisSlidingWindowRateLimiterOptions { PermitLimit = permitLimit, Window = TimeSpan.FromMinutes(rateLimiterSettings.PaymentsApiWindowMinutes), ConnectionMultiplexerFactory = () => connectionMultiplexer });
+            });
+
+            options.OnRejected = (context, ct) => RateLimitMetadata.OnRejected(context.HttpContext, context.Lease, ct);
+        });
+
+        services.AddSingleton<MessageSettings>();//warmup
+        services.AddSingleton<EFLoggerFactory>();
+
+        services.AddBaseDbContextPool<AccountLinkContext>()
+            .AddBaseDbContextPool<CoreDbContext>()
+            .AddBaseDbContextPool<TenantDbContext>()
+            .AddBaseDbContextPool<UserDbContext>()
+            .AddBaseDbContextPool<TelegramDbContext>()
+            .AddBaseDbContextPool<FirebaseDbContext>()
+            .AddBaseDbContextPool<CustomDbContext>()
+            .AddBaseDbContextPool<UrlShortenerDbContext>()
+            .AddBaseDbContextPool<WebstudioDbContext>()
+            .AddBaseDbContextPool<InstanceRegistrationContext>()
+            .AddBaseDbContextPool<IntegrationEventLogContext>()
+            .AddBaseDbContextPool<MessagesContext>()
+            .AddBaseDbContextPool<WebhooksDbContext>()
+            .AddBaseDbContextPool<ApiKeysDbContext>();
+
+        DIHelper.Configure(services);
+
+        services.ConfigureOptions<ConfigureJsonOptions>();
+
+        services.AddControllers();
+
+        DIHelper.Scan();
+
+        if (!string.IsNullOrEmpty(_corsOrigin))
+        {
+            services.AddCors(options =>
+            {
+                options.AddPolicy(name: CorsPoliciesEnums.DynamicCorsPolicyName,
+                                  policy =>
+                                  {
+                                      policy.WithOrigins(_corsOrigin)
+                                            .SetIsOriginAllowedToAllowWildcardSubdomains()
+                                            .AllowAnyHeader()
+                                            .AllowAnyMethod();
+
+                                      if (_corsOrigin != "*")
+                                      {
+                                          policy.AllowCredentials();
+                                      }
+                                  });
+
+                options.AddPolicy(name: CorsPoliciesEnums.AllowAllCorsPolicyName,
+                                  policy =>
+                                  {
+                                      policy.WithOrigins("*")
+                                            .SetIsOriginAllowedToAllowWildcardSubdomains()
+                                            .AllowAnyHeader()
+                                            .AllowAnyMethod();
+                                  });
+            });
+
+            services.AddTransient<ICorsPolicyProvider, DynamicCorsPolicyProvider>();
+        }
+
+
+        services.AddHybridCache(connectionMultiplexer)
+            .AddMemoryCache(connectionMultiplexer)
+            .AddEventBus(_configuration)
+            .AddDistributedTaskQueue()
+            .AddCacheNotify(_configuration)
+            .AddDistributedLock(_configuration)
+            .AddHeartBeat(_configuration);
+
+        services.RegisterFeature();
+
+        services.AddOptions();
+
+        var mvcBuilder = services.AddMvcCore(config =>
+        {
+            config.Conventions.Add(new ControllerNameAttributeConvention());
+
+            var policy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
+
+            config.Filters.Add(new AuthorizeFilter(policy));
+            config.Filters.Add(new TypeFilterAttribute(typeof(TenantStatusFilter)));
+            config.Filters.Add(new TypeFilterAttribute(typeof(PaymentFilter)));
+            config.Filters.Add(new TypeFilterAttribute(typeof(AiFeatureFilter)));
+            config.Filters.Add(new TypeFilterAttribute(typeof(IpSecurityFilter)));
+            config.Filters.Add(new TypeFilterAttribute(typeof(ProductSecurityFilter)));
+            config.Filters.Add(new TypeFilterAttribute(typeof(ApiKeyScopesFilter)));
+            config.Filters.Add(new CustomResponseFilterAttribute());
+        });
+
+        if (OpenApiEnabled)
+        {
+            mvcBuilder.AddApiExplorer();
+
+            services.AddOpenApi(_configuration);
+        }
+        if (OpenTelemetryEnabled)
+        {
+            builder.ConfigureOpenTelemetry();
+        }
+        services.AddScoped<CookieAuthHandler>();
+        services.AddScoped<BasicAuthHandler>();
+        services.AddScoped<ConfirmAuthHandler>();
+        services
+            .AddAuthentication(options =>
+            {
+                options.DefaultScheme = MultiAuthSchemes;
+                options.DefaultChallengeScheme = MultiAuthSchemes;
+            })
+            .AddScheme<AuthenticationSchemeOptions, CookieAuthHandler>(CookieAuthenticationDefaults.AuthenticationScheme, _ => { })
+            .AddScheme<AuthenticationSchemeOptions, BasicAuthHandler>(BasicAuthScheme, _ => { })
+            .AddScheme<AuthenticationSchemeOptions, ConfirmAuthHandler>("confirm", _ => { })
+            .AddPolicyScheme(MultiAuthSchemes, MultiAuthSchemes, options =>
+            {
+                options.ForwardDefaultSelector = context =>
+                {
+                    string authorizationHeader = context.Request.Headers[HeaderNames.Authorization];
+
+                    if (string.IsNullOrEmpty(authorizationHeader))
+                    {
+                        return CookieAuthenticationDefaults.AuthenticationScheme;
+                    }
+
+                    if (authorizationHeader.StartsWith("Basic "))
+                    {
+                        return BasicAuthScheme;
+                    }
+
+                    if (authorizationHeader.StartsWith("Bearer "))
+                    {
+                        var token = authorizationHeader["Bearer ".Length..].Trim();
+                        var jwtHandler = new JwtSecurityTokenHandler();
+
+                        if (jwtHandler.CanReadToken(token))
+                        {
+                            return JwtBearerDefaults.AuthenticationScheme;
+                        }
+
+                        if (token.StartsWith("sk-"))
+                        {
+                            return ApiKeyBearerDefaults.AuthenticationScheme;
+                        }
+                    }
+
+                    return CookieAuthenticationDefaults.AuthenticationScheme;
+                };
+            });
+
+        services.AddApiKeyBearerAuthentication()
+                .AddJwtBearerAuthentication();
+
+        services.AddBillingHttpClient();
+        services.AddAccountingHttpClient();
+
+        services.ConfigureNotificationServices();
+
+        services.AddSingleton(Channel.CreateUnbounded<SocketData>());
+        services.AddSingleton(svc => svc.GetRequiredService<Channel<SocketData>>().Reader);
+        services.AddSingleton(svc => svc.GetRequiredService<Channel<SocketData>>().Writer);
+        services.AddHostedService<SocketService>();
+        services.AddSocketHttpClient(_configuration);
+
+        services.RegisterQueue<ResizeWorkerItem>(2);
+
+        services
+            .AddStartupTask<WarmupServicesStartupTask>()
+            .AddStartupTask<WarmupProtobufStartupTask>()
+            .AddStartupTask<WarmupBaseDbContextStartupTask>()
+            .TryAddSingleton(services);
+
+        services.AddTransient<DistributedTaskProgress>();
+    }
+
+    public virtual void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    {
+        app.UseForwardedHeaders();
+        app.UseExceptionHandler();
+        app.UseRouting();
+
+        app.Use(next => async context =>
+        {
+            var stopWatch = new Stopwatch();
+            stopWatch.Start();
+
+            context.Response.OnStarting(() =>
+            {
+                stopWatch.Stop();
+
+                var headerValue = $"aspnetcore-request-time;dur={stopWatch.ElapsedMilliseconds}ms";
+
+                context.Response.Headers.Append("Server-Timing", headerValue);
+
+                return Task.CompletedTask;
+            });
+
+            await next(context);
+        });
+
+        app.UseSynchronizationContextMiddleware();
+
+        app.UseTenantMiddleware();
+
+        if (!string.IsNullOrEmpty(_corsOrigin))
+        {
+            app.UseCors(CorsPoliciesEnums.DynamicCorsPolicyName);
+        }
+
+        app.UseAuthentication();
+
+        // TODO: if some client requests very slow, this line will need to remove
+        bool.TryParse(_configuration["core:hosting:rateLimiterOptions:enable"], out var enableRateLimiter);
+
+        if (enableRateLimiter)
+        {
+            app.UseRateLimiter();
+        }
+
+        app.UseAuthorization();
+
+        app.UseCultureMiddleware();
+
+        app.UseLoggerMiddleware();
+
+
+        if (OpenApiEnabled)
+        {
+            app.UseOpenApi();
+        }
+
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapCustomAsync();
+
+            endpoints.MapHealthChecks("/health", new HealthCheckOptions
+            {
+                Predicate = _ => true,
+                ResponseWriter = DefaultHealthChecksResponseWriter
+            }).ShortCircuit();
+
+            endpoints.MapHealthChecks("/ready", new HealthCheckOptions
+            {
+                Predicate = r => r.Name.Contains("services"),
+                ResponseWriter = DefaultHealthChecksResponseWriter
+            });
+
+            endpoints.MapHealthChecks("/liveness", new HealthCheckOptions { Predicate = r => r.Name.Contains("self") });
+        });
+
+        app.Map("/switch", appBuilder =>
+        {
+            appBuilder.Run(async context =>
+            {
+                CustomHealthCheck.Running = !CustomHealthCheck.Running;
+                await context.Response.WriteAsync($"{Environment.MachineName} running {CustomHealthCheck.Running}");
+            });
+        });
+    }
+
+    private async Task DefaultHealthChecksResponseWriter(HttpContext httpContext, HealthReport healthReport)
+    {
+        var logger = httpContext.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("ASC.Api.HealthChecks");
+
+        if (healthReport.Status != HealthStatus.Healthy)
+        {
+            logger.ErrorHealthCheckFailed(healthReport.Status.ToString(), healthReport.TotalDuration.TotalMilliseconds);
+
+            foreach (var entry in healthReport.Entries.Where(e => e.Value.Status != HealthStatus.Healthy))
+            {
+                logger.ErrorHealthCheckEntry(entry.Key,
+                    entry.Value.Status.ToString(),
+                    entry.Value.Duration.TotalMilliseconds,
+                    entry.Value.Description);
+            }
+        }
+
+        await UIResponseWriter.WriteHealthCheckUIResponse(httpContext, healthReport);
+    }
+
+    public void ConfigureContainer(ContainerBuilder builder)
+    {
+        builder.Register(_configuration);
+    }
+}

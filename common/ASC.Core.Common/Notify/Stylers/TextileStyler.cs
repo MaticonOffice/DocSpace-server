@@ -1,0 +1,355 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Notify.Textile;
+
+[Scope]
+public class TextileStyler(CoreBaseSettings coreBaseSettings,
+        IConfiguration configuration,
+        InstanceCrypto instanceCrypto,
+        ExternalResourceSettingsHelper externalResourceSettingsHelper)
+    : IPatternStyler
+{
+    private static readonly Regex _velocityArguments
+        = new(NVelocityPatternFormatter.NoStylePreffix + "(?<arg>.*?)" + NVelocityPatternFormatter.NoStyleSuffix,
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
+    static TextileStyler()
+    {
+        const string file = "ASC.Core.Common.Notify.Stylers.Resources.style.css";
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(file);
+        using var reader = new StreamReader(stream);
+        BlockAttributesParser.Styler = new StyleReader(reader.ReadToEnd().Replace("\n", "").Replace("\r", ""));
+    }
+
+    public async Task ApplyFormatingAsync(NoticeMessage message)
+    {
+        var output = new StringBuilderTextileFormatter();
+        var formatter = new TextileFormatter(output);
+
+        if (!string.IsNullOrEmpty(message.Subject))
+        {
+            message.Subject = _velocityArguments.Replace(message.Subject, m => m.Result("${arg}"));
+        }
+
+        if (string.IsNullOrEmpty(message.Body))
+        {
+            return;
+        }
+
+        formatter.Format(message.Body);
+
+        var template = GetTemplate(message);
+        var imagePath = GetImagePath(message);
+        var mailSettings = GetMailSettings(message);
+        var unsubscribeText = await GetUnsubscribeTextAsync(message);
+
+        InitTopImage(message, out var topImage);
+        InitFooter(message, mailSettings, out var footerContent, out var footerSocialContent);
+
+        var content = output.GetFormattedText().Trim();
+
+        if (!content.StartsWith("<tr"))
+        {
+            content = $@"<tr border=""0"" cellspacing=""0"" cellpadding=""0"">
+                <td style=""padding: 0 40px; margin: 0; text-align: center; vertical-align: top; width: 600px; max-width: 600px;"">{content}</td>
+            </tr>";
+        }
+
+        message.Body = template.Replace("%CONTENT%", content)
+                               .Replace("%TOPIMAGE%", topImage)
+                               .Replace("%FOOTER%", footerContent)
+                               .Replace("%FOOTERSOCIAL%", footerSocialContent)
+                               .Replace("%TEXTFOOTER%", unsubscribeText)
+                               .Replace("%IMAGEPATH%", imagePath);
+    }
+
+    private static string GetTemplate(NoticeMessage message)
+    {
+        var template = NotifyTemplateResource.HtmlMaster;
+
+        var templateTag = message.GetArgument("MasterTemplate");
+        if (templateTag != null)
+        {
+            var templateTagValue = templateTag.Value as string;
+            if (!string.IsNullOrEmpty(templateTagValue))
+            {
+                var templateValue = NotifyTemplateResource.ResourceManager.GetString(templateTagValue);
+                if (!string.IsNullOrEmpty(templateValue))
+                {
+                    template = templateValue;
+                }
+            }
+        }
+
+        return template;
+    }
+
+    private static string GetImagePath(NoticeMessage message)
+    {
+        var imagePathTag = message.GetArgument("ImagePath");
+
+        return imagePathTag == null ? string.Empty : (string)imagePathTag.Value;
+    }
+
+    private string GetLogoImg(NoticeMessage message, string imagePath)
+    {
+        var logoImg = configuration["web:logo:mail"];
+        if (string.IsNullOrEmpty(logoImg))
+        {
+            var logo = message.GetArgument("LetterLogo");
+            if (logo != null && ((string)logo.Value).Length != 0)
+            {
+                logoImg = (string)logo.Value;
+            }
+            else
+            {
+                logoImg = imagePath + "/mail_logo.png";
+            }
+        }
+
+        return logoImg;
+    }
+
+    private string GetLogoText(NoticeMessage message)
+    {
+        var logoText = configuration["web:logotext:mail"];
+
+        if (string.IsNullOrEmpty(logoText))
+        {
+            var llt = message.GetArgument("LetterLogoText");
+            if (llt != null && ((string)llt.Value).Length != 0)
+            {
+                logoText = (string)llt.Value;
+            }
+            else
+            {
+                logoText = BaseWhiteLabelSettings.DefaultLogoText;
+            }
+        }
+
+        return logoText;
+    }
+
+    private static MailWhiteLabelSettings GetMailSettings(NoticeMessage message)
+    {
+        var mailWhiteLabelTag = message.GetArgument("MailWhiteLabelSettings");
+
+        return mailWhiteLabelTag?.Value as MailWhiteLabelSettings;
+    }
+
+    private void InitFooter(NoticeMessage message, MailWhiteLabelSettings settings, out string footerContent, out string footerSocialContent)
+    {
+        footerContent = string.Empty;
+        footerSocialContent = string.Empty;
+
+        var footer = message.GetArgument("Footer");
+
+        if (footer == null)
+        {
+            return;
+        }
+
+        var footerValue = (string)footer.Value;
+
+        if (string.IsNullOrEmpty(footerValue))
+        {
+            return;
+        }
+
+        switch (footerValue)
+        {
+            case "common":
+                InitCommonFooter(settings, out footerContent, out footerSocialContent);
+                break;
+            case "social":
+                InitSocialFooter(settings, out footerSocialContent);
+                break;
+            case "opensource":
+                InitOpensourceFooter(settings, out footerContent, out footerSocialContent);
+                break;
+        }
+
+        footerSocialContent = footerSocialContent
+            .Replace("%SOCIALNETWORKFACEBOOK%", externalResourceSettingsHelper.SocialNetworks.GetDefaultRegionalFullEntry("facebook"))
+            .Replace("%SOCIALNETWORKTWITTER%", externalResourceSettingsHelper.SocialNetworks.GetDefaultRegionalFullEntry("twitter"))
+            .Replace("%SOCIALNETWORKYOUTUBE%", externalResourceSettingsHelper.SocialNetworks.GetDefaultRegionalFullEntry("youtube"))
+            .Replace("%SOCIALNETWORKINSTAGRAM%", externalResourceSettingsHelper.SocialNetworks.GetDefaultRegionalFullEntry("instagram"))
+            .Replace("%SOCIALNETWORKTIKTOK%", externalResourceSettingsHelper.SocialNetworks.GetDefaultRegionalFullEntry("tiktok"));
+    }
+
+    private void InitTopImage(NoticeMessage message, out string footerTop)
+    {
+        var imagePath = GetImagePath(message);
+        var logoImg = GetLogoImg(message, imagePath);
+        var logoText = GetLogoText(message);
+        var siteUrl = externalResourceSettingsHelper.Site.GetDefaultRegionalDomain();
+        var topGif = message.GetArgument("TopGif");
+
+        if (topGif != null && !string.IsNullOrEmpty((string)topGif.Value))
+        {
+            footerTop = NotifyTemplateResource.TopGif
+                .Replace("%LOGO%", (string)topGif.Value)
+                .Replace("%LOGOTEXT%", logoText)
+                .Replace("%SITEURL%", siteUrl);
+        }
+        else
+        {
+            footerTop = NotifyTemplateResource.TopLogo
+                .Replace("%LOGO%", logoImg)
+                .Replace("%LOGOTEXT%", logoText)
+                .Replace("%SITEURL%", siteUrl);
+        }
+    }
+
+    private void InitCommonFooter(MailWhiteLabelSettings settings, out string footerContent, out string footerSocialContent)
+    {
+        footerContent = string.Empty;
+        footerSocialContent = string.Empty;
+
+        if (settings.FooterEnabled)
+        {
+            var supportUrl = externalResourceSettingsHelper.Support.GetDefaultRegionalDomain();
+            var supportEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("supportemail");
+            var salesEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("paymentemail");
+            var demoUrl = externalResourceSettingsHelper.Site.GetDefaultRegionalFullEntry("demoorder");
+
+            footerContent = NotifyTemplateResource.FooterCommonV10
+                .Replace("%SUPPORTURL%", string.IsNullOrEmpty(supportUrl) ? "mailto:" + supportEmail : supportUrl)
+                .Replace("%SALESEMAIL%", salesEmail)
+                .Replace("%DEMOURL%", string.IsNullOrEmpty(demoUrl) ? "mailto:" + salesEmail : demoUrl);
+
+            footerSocialContent = settings.FooterSocialEnabled ? NotifyTemplateResource.SocialNetworksFooter : string.Empty;
+        }
+    }
+
+    private static void InitSocialFooter(MailWhiteLabelSettings settings, out string footerSocialContent)
+    {
+        footerSocialContent = string.Empty;
+
+        if (settings == null || (settings.FooterEnabled && settings.FooterSocialEnabled))
+        {
+            footerSocialContent = NotifyTemplateResource.SocialNetworksFooter;
+        }
+    }
+
+    private void InitOpensourceFooter(MailWhiteLabelSettings settings, out string footerContent, out string footerSocialContent)
+    {
+        footerContent = string.Empty;
+        footerSocialContent = string.Empty;
+
+        if (settings.FooterEnabled)
+        {
+            var supportUrl = externalResourceSettingsHelper.Forum.GetDefaultRegionalDomain();
+            var supportEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("supportemail");
+            var salesEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("paymentemail");
+            var demoUrl = externalResourceSettingsHelper.Site.GetDefaultRegionalFullEntry("demoorder");
+
+            footerContent = NotifyTemplateResource.FooterOpensourceV10
+                .Replace("%SUPPORTURL%", string.IsNullOrEmpty(supportUrl) ? "mailto:" + supportEmail : supportUrl)
+                .Replace("%SALESEMAIL%", salesEmail)
+                .Replace("%DEMOURL%", string.IsNullOrEmpty(demoUrl) ? "mailto:" + salesEmail : demoUrl);
+
+            footerSocialContent = settings.FooterSocialEnabled ? NotifyTemplateResource.SocialNetworksFooter : string.Empty;
+        }
+    }
+
+    private async Task<string> GetUnsubscribeTextAsync(NoticeMessage message)
+    {
+        var withoutUnsubscribe = message.GetArgument("WithoutUnsubscribe");
+
+        if (withoutUnsubscribe != null && bool.TryParse((string)withoutUnsubscribe.Value, out var val) && val)
+        {
+            return string.Empty;
+        }
+
+        var unsubscribeLink = await GetPortalUnsubscribeLinkAsync(message);
+
+        if (string.IsNullOrEmpty(unsubscribeLink))
+        {
+            return string.Empty;
+        }
+
+        var rootPath = message.GetArgument("__VirtualRootPath").Value;
+
+        var supportUrl = externalResourceSettingsHelper.Support.GetDefaultRegionalDomain();
+        var supportEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("supportemail");
+        var salesEmail = externalResourceSettingsHelper.Common.GetDefaultRegionalFullEntry("paymentemail");
+
+        return string.Format(NotifyTemplateResource.TextForFooterUnsubsribe, rootPath, unsubscribeLink)
+            .Replace("%SUPPORTURL%", string.IsNullOrEmpty(supportUrl) ? "mailto:" + supportEmail : supportUrl)
+            .Replace("%SALESEMAIL%", salesEmail);
+    }
+
+    private async Task<string> GetPortalUnsubscribeLinkAsync(NoticeMessage message)
+    {
+        var subscriptionConfigArgument = message.GetArgument("RecipientSubscriptionConfigURL");
+
+        var subscriptionConfigLink = (string)subscriptionConfigArgument?.Value;
+
+        if (!string.IsNullOrEmpty(subscriptionConfigLink))
+        {
+            return subscriptionConfigLink;
+        }
+
+        var unsubscribeLinkArgument = message.GetArgument("ProfileUrl");
+
+        var unsubscribeLink = (string)unsubscribeLinkArgument?.Value;
+
+        if (!string.IsNullOrEmpty(unsubscribeLink))
+        {
+            return unsubscribeLink + "/notification";
+        }
+
+        return await GetSiteUnsubscribeLinkAsync(message);
+    }
+
+    private async Task<string> GetSiteUnsubscribeLinkAsync(NoticeMessage message)
+    {
+        var mail = message.Recipient.Addresses.FirstOrDefault(r => r.Contains('@'));
+
+        if (string.IsNullOrEmpty(mail))
+        {
+            return string.Empty;
+        }
+
+        var format = coreBaseSettings.CustomMode
+                         ? "{0}/unsubscribe/{1}"
+                         : "{0}/Unsubscribe.aspx?id={1}";
+
+        var site = externalResourceSettingsHelper.Site.GetDefaultRegionalDomain();
+
+        var input = await instanceCrypto.EncryptAsync(Encoding.UTF8.GetBytes(mail.ToLowerInvariant()));
+        return string.Format(format, site, WebEncoders.Base64UrlEncode(input));
+    }
+}

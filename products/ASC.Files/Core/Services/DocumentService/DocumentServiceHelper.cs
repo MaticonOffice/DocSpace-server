@@ -1,0 +1,760 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Files.Services.DocumentService;
+
+[Scope]
+public class DocumentServiceHelper(IDaoFactory daoFactory,
+        UserManager userManager,
+        DisplayUserSettingsHelper displayUserSettingsHelper,
+        FileSecurity fileSecurity,
+        FileUtility fileUtility,
+        FilesLinkUtility filesLinkUtility,
+        MachinePseudoKeys machinePseudoKeys,
+        Global global,
+        TenantUtil tenantUtil,
+        DocumentServiceConnector documentServiceConnector,
+        LockerManager lockerManager,
+        CustomFilterManager customFilterManager,
+        FileTrackerHelper fileTracker,
+        EntryStatusManager entryStatusManager,
+        IServiceProvider serviceProvider,
+        ExternalShare externalShare,
+        IHttpContextAccessor httpContextAccessor,
+        AuthContext authContext,
+        SecurityContext securityContext,
+        SettingsManager settingsManager,
+        IQuotaService quotaService,
+        TenantManager tenantManager,
+        CoreSettings coreSettings)
+{
+    public async Task<(File<T> File, bool LastVersion)> GetCurFileInfoAsync<T>(T fileId, int version)
+    {
+        var lastVersion = true;
+
+        var fileDao = daoFactory.GetFileDao<T>();
+
+        var file = await fileDao.GetFileAsync(fileId);
+        if (file != null && 0 < version && version < file.Version)
+        {
+            file = await fileDao.GetFileAsync(fileId, version);
+            lastVersion = false;
+        }
+
+        if (file == null)
+        {
+            throw new FileNotFoundException(FilesCommonResource.ErrorMessage_FileNotFound);
+        }
+
+        return (file, lastVersion);
+    }
+
+    public async Task<(File<T> File, Configuration<T> Configuration, bool LocatedInPrivateRoom)> GetParamsAsync<T>(File<T> file, bool lastVersion, bool editPossible, bool tryEdit,
+        bool tryCoauth, bool fillFormsPossible, EditorType editorType, bool isSubmitOnly = false)
+    {
+        var docParams = await GetParamsAsync(file, lastVersion, editPossible, editPossible, tryEdit, tryCoauth, fillFormsPossible);
+        docParams.Configuration.EditorType = editorType;
+
+        if (isSubmitOnly)
+        {
+            docParams.Configuration.Document.Key = GetDocSubmitKeyAsync(docParams.Configuration.Document.Key);
+        }
+
+        return docParams;
+    }
+
+    public async Task<(File<T> File, Configuration<T> Configuration, bool LocatedInPrivateRoom)> GetParamsAsync<T>(T fileId, int version, bool editPossible, bool tryEdit,
+        bool tryCoAuthoring, bool fillFormsPossible)
+    {
+        var (file, lastVersion) = await GetCurFileInfoAsync(fileId, version);
+
+        return await GetParamsAsync(file, lastVersion, true, editPossible, tryEdit, tryCoAuthoring, fillFormsPossible);
+    }
+
+    public async Task<QuotaScope?> CheckCustomQuotaAsync<T>(Folder<T> rootFolder)
+    {
+        var tenantQuotaSetting = await settingsManager.LoadAsync<TenantQuotaSettings>();
+        if (tenantQuotaSetting.EnableQuota)
+        {
+            var usedSize = (await tenantManager.FindTenantQuotaRowsAsync(tenantManager.GetCurrentTenant().Id))
+                .Where(r => !string.IsNullOrEmpty(r.Tag) && new Guid(r.Tag) != Guid.Empty)
+                .Sum(r => r.Counter);
+            if (tenantQuotaSetting.Quota < usedSize)
+            {
+                return QuotaScope.Tenant;
+            }
+        }
+        if (rootFolder.IsRoom && !rootFolder.ProviderEntry)
+        {
+            TenantEntityQuotaSettings quotaSettings = rootFolder.FolderType is FolderType.AiRoom
+                    ? await settingsManager.LoadAsync<TenantAiAgentQuotaSettings>()
+                    : await settingsManager.LoadAsync<TenantRoomQuotaSettings>();
+            if (quotaSettings.EnableQuota)
+            {
+                var roomQuotaLimit = rootFolder.SettingsQuota == TenantEntityQuotaSettings.DefaultQuotaValue ? quotaSettings.DefaultQuota : rootFolder.SettingsQuota;
+                if (roomQuotaLimit != TenantEntityQuotaSettings.NoQuota && roomQuotaLimit <= rootFolder.Counter)
+                {
+                    return QuotaScope.Room;
+                }
+            }
+        }
+        else
+        {
+            var quotaUserSettings = await settingsManager.LoadAsync<TenantUserQuotaSettings>();
+            if (quotaUserSettings.EnableQuota)
+            {
+                var user = await userManager.GetUsersAsync(authContext.CurrentAccount.ID);
+                var userQuotaData = await settingsManager.LoadAsync<UserQuotaSettings>(user);
+                var userQuotaLimit = userQuotaData.UserQuota == userQuotaData.GetDefault().UserQuota ? quotaUserSettings.DefaultQuota : userQuotaData.UserQuota;
+                if (userQuotaLimit != UserQuotaSettings.NoQuota)
+                {
+                    var userUsedSpace = Math.Max(0, (await quotaService.FindUserQuotaRowsAsync(user.TenantId, user.Id)).Where(r => !string.IsNullOrEmpty(r.Tag) && !string.Equals(r.Tag, Guid.Empty.ToString())).Sum(r => r.Counter));
+                    if (userQuotaLimit <= userUsedSpace)
+                    {
+                        return QuotaScope.User;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<(File<T> File, Configuration<T> Configuration, bool LocatedInPrivateRoom)> GetParamsAsync<T>(File<T> file, bool lastVersion,
+        bool rightToEdit, bool editPossible, bool tryEdit, bool tryCoAuthoring, bool fillFormsPossible)
+    {
+        if (file == null)
+        {
+            throw new FileNotFoundException(FilesCommonResource.ErrorMessage_FileNotFound);
+        }
+
+        if (!string.IsNullOrEmpty(file.Error))
+        {
+            throw new Exception(file.Error);
+        }
+
+        var rightToReview = rightToEdit;
+        var reviewPossible = editPossible;
+
+        var rightToFillForms = fillFormsPossible;
+
+        var rightToComment = rightToEdit;
+        var commentPossible = editPossible;
+
+        var rightModifyFilter = rightToEdit;
+
+        rightToEdit = rightToEdit && (await fileSecurity.CanEditAsync(file) || await fileSecurity.CanCustomFilterEditAsync(file));
+        if (editPossible && !rightToEdit)
+        {
+            editPossible = false;
+        }
+
+        rightModifyFilter = rightModifyFilter && await fileSecurity.CanEditAsync(file) && !await customFilterManager.CustomFilterEnabledForMeAsync(file);
+
+        rightToReview = rightToReview && await fileSecurity.CanReviewAsync(file);
+        if (reviewPossible && !rightToReview)
+        {
+            reviewPossible = false;
+        }
+
+        rightToFillForms = rightToFillForms && await fileSecurity.CanFillFormsAsync(file);
+        if (fillFormsPossible && !rightToFillForms)
+        {
+            fillFormsPossible = false;
+        }
+
+        rightToComment = rightToComment && await fileSecurity.CanCommentAsync(file);
+        if (commentPossible && !rightToComment)
+        {
+            commentPossible = false;
+        }
+
+        if (!(editPossible || reviewPossible || fillFormsPossible || commentPossible) && !await fileSecurity.CanReadAsync(file))
+        {
+            if (file.ShareRecord is { IsLink: true, Share: not FileShare.Restrict, Options.Internal: true } && !authContext.IsAuthenticated)
+            {
+                throw new LinkScopeException(FilesCommonResource.ErrorMessage_SecurityException_ReadFile);
+            }
+
+            throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException_ReadFile);
+        }
+
+        if (file.RootFolderType == FolderType.TRASH)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_ViewTrashItem);
+        }
+
+        string strError = null;
+        if ((editPossible || reviewPossible || fillFormsPossible || commentPossible) && await lockerManager.FileLockedForMeAsync(file.Id))
+        {
+            if (tryEdit)
+            {
+                strError = FilesCommonResource.ErrorMessage_LockedFile;
+            }
+
+            rightToEdit = editPossible = false;
+            rightToReview = reviewPossible = false;
+            rightToFillForms = fillFormsPossible = false;
+            rightToComment = commentPossible = false;
+        }
+
+        if (editPossible && !fileUtility.CanWebEdit(file.Title))
+        {
+            rightToEdit = editPossible = false;
+        }
+
+        var locatedInPrivateRoom = false;
+        Options options = null;
+        if (file.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+        {
+            var folderDao = daoFactory.GetFolderDao<T>();
+            var room = await DocSpaceHelper.GetParentRoom(file, folderDao);
+            locatedInPrivateRoom = DocSpaceHelper.LocatedInPrivateRoomAsync(room);
+            options = GetOptions(room);
+        }
+
+        if (file.Encrypted && file.RootFolderType != FolderType.Privacy && !locatedInPrivateRoom)
+        {
+            rightToEdit = editPossible = false;
+            rightToReview = reviewPossible = false;
+            rightToFillForms = fillFormsPossible = false;
+            rightToComment = commentPossible = false;
+        }
+
+        if (!editPossible && !fileUtility.CanWebView(file.Title))
+        {
+            throw new NotSupportedException($"{FilesCommonResource.ErrorMessage_NotSupportedFormat} ({FileUtility.GetFileExtension(file.Title)})");
+        }
+
+        if (reviewPossible && !fileUtility.CanWebReview(file.Title))
+        {
+            rightToReview = reviewPossible = false;
+        }
+
+        if (fillFormsPossible && !fileUtility.CanWebRestrictedEditing(file.Title))
+        {
+            rightToFillForms = fillFormsPossible = false;
+        }
+
+        if (commentPossible && !fileUtility.CanWebComment(file.Title))
+        {
+            rightToComment = commentPossible = false;
+        }
+
+        if (await fileTracker.IsEditingAsync(file.Id))
+        {
+            if ((editPossible || reviewPossible || fillFormsPossible || commentPossible)
+                && tryCoAuthoring
+                && await fileTracker.IsEditingAloneAsync(file.Id))
+            {
+                if (tryEdit)
+                {
+                    var editingBy = (await fileTracker.GetEditingByAsync(file.Id)).FirstOrDefault();
+                    strError = string.Format(FilesCommonResource.ErrorMessage_EditingMobile, await global.GetUserNameAsync(editingBy, true));
+                }
+
+                rightToEdit = editPossible = reviewPossible = fillFormsPossible = commentPossible = false;
+            }
+        }
+
+        var fileStable = file;
+        if (lastVersion && file.Forcesave != ForcesaveType.None && tryEdit)
+        {
+            var fileDao = daoFactory.GetFileDao<T>();
+            fileStable = await fileDao.GetFileStableAsync(file.Id, file.Version);
+        }
+
+        var docKey = await GetDocKeyAsync(fileStable);
+        var modeWrite = (editPossible || reviewPossible || fillFormsPossible || commentPossible) && tryEdit;
+
+        if (file.ParentId != null)
+        {
+            await entryStatusManager.SetFileStatusAsync(file);
+        }
+
+        var rightToDownload = await fileSecurity.CanDownloadAsync(file);
+        var noWatermark = options?.WatermarkOnDraw == null;
+
+        var configuration = serviceProvider.GetService<Configuration<T>>();
+        configuration.Document.Key = docKey;
+        configuration.Document.Permissions = new PermissionsConfig
+        {
+            Edit = rightToEdit && lastVersion,
+            Review = rightToReview && lastVersion,
+            FillForms = rightToFillForms && lastVersion,
+            Comment = rightToComment && lastVersion,
+            ModifyFilter = rightModifyFilter,
+            Print = rightToDownload,
+            Download = rightToDownload && noWatermark,
+            Copy = rightToDownload,
+            Protect = authContext.IsAuthenticated && !await userManager.IsGuestAsync(authContext.CurrentAccount.ID),
+            Chat = file.Access != FileShare.Read
+        };
+
+        configuration.Document.Options = options;
+        configuration.EditorConfig.ModeWrite = modeWrite;
+        configuration.Error = strError;
+
+        if (!lastVersion)
+        {
+            configuration.Document.Title =  $"{file.Title} ({file.CreateOnString})";
+        }
+
+        if (fileUtility.CanWebRestrictedEditing(file.Title))
+        {
+            var linkDao = daoFactory.GetLinkDao<T>();
+            var sourceId = await linkDao.GetSourceAsync(file.Id);
+            configuration.Document.IsLinkedForMe = Equals(sourceId, default(T));
+        }
+
+        if (await externalShare.GetLinkIdAsync() == Guid.Empty)
+        {
+            return (file, configuration, locatedInPrivateRoom);
+        }
+
+        configuration.Document.SharedLinkParam = FilesLinkUtility.ShareKey;
+        configuration.Document.SharedLinkKey = externalShare.GetKey();
+
+        return (file, configuration, locatedInPrivateRoom);
+    }
+
+    public string GetSignature(object payload)
+    {
+        var signatureSecret = filesLinkUtility.DocServiceSignatureSecret;
+
+        if (string.IsNullOrEmpty(signatureSecret))
+        {
+            return null;
+        }
+
+        return JsonWebToken.Encode(payload, signatureSecret);
+    }
+
+    public async Task<File<T>> CheckNeedDeletion<T>(IFileDao<T> fileDao, T fileId, FormFillingProperties<T> formFillingProperties)
+    {
+        var file = await fileDao.GetFileAsync(fileId);
+
+        if (Equals(formFillingProperties.ToFolderId, file.ParentId))
+        {
+            await securityContext.AuthenticateMeAsync(file.CreateBy);
+
+            var linkDao = daoFactory.GetLinkDao<T>();
+            var sourceId = await linkDao.GetSourceAsync(file.Id);
+            if (Equals(sourceId, default(T)))
+            {
+                return file;
+            }
+        }
+        return null;
+    }
+
+    public Options GetOptions<T>(Folder<T> room)
+    {
+        var watermarkSettings = room?.SettingsWatermark;
+        if (watermarkSettings == null)
+        {
+            return null;
+        }
+        var runs = new List<Run>();
+        var paragrahs = new List<Paragraph>();
+        var userInfo = userManager.GetUsers(authContext.CurrentAccount.ID);
+        var ip = httpContextAccessor.HttpContext?.Connection.RemoteIpAddress.ToString();
+
+        if (watermarkSettings.Additions.HasFlag(WatermarkAdditions.UserName))
+        {
+            runs.Add(new Run(userInfo.DisplayUserName(false, displayUserSettingsHelper)));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (watermarkSettings.Additions.HasFlag(WatermarkAdditions.UserEmail) && !string.IsNullOrWhiteSpace(userInfo.Email))
+        {
+            runs.Add(new Run(userInfo.Email));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (watermarkSettings.Additions.HasFlag(WatermarkAdditions.UserIpAdress) && !string.IsNullOrWhiteSpace(ip))
+        {
+            runs.Add(new Run(ip));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (watermarkSettings.Additions.HasFlag(WatermarkAdditions.CurrentDate))
+        {
+            runs.Add(new Run(tenantUtil.DateTimeNow().ToString(), false));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (watermarkSettings.Additions.HasFlag(WatermarkAdditions.RoomName))
+        {
+            runs.Add(new Run(room.Title));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (!string.IsNullOrWhiteSpace(watermarkSettings.Text))
+        {
+            runs.Add(new Run(watermarkSettings.Text));
+            runs.Add(new Run(Environment.NewLine, false));
+        }
+        if (runs.Count != 0)
+        {
+            runs.Remove(runs.Last());
+        }
+        paragrahs.Add(new Paragraph(runs));
+
+        var options = new Options
+        {
+            WatermarkOnDraw = new WatermarkOnDraw(watermarkSettings.ImageWidth * watermarkSettings.ImageScale / 100, watermarkSettings.ImageHeight * watermarkSettings.ImageScale / 100, watermarkSettings.ImageUrl, watermarkSettings.Rotate, paragrahs)
+        };
+        return options;
+    }
+
+    public async Task<string> GetDocKeyAsync<T>(File<T> file, string extraKey = null)
+    {
+        return await GetDocKeyAsync(file.Id, file.Version, file.ProviderEntry ? file.ModifiedOn : file.CreateOn, extraKey);
+    }
+
+    public async Task<string> GetDocKeyAsync<T>(T fileId, int fileVersion, DateTime modified, string extraKey = null)
+    {
+        var str = $"maticon_{fileId}_{fileVersion}_{modified.GetHashCode().ToString(CultureInfo.InvariantCulture)}_{await coreSettings.GetDocDbKeyAsync()}";
+
+        if (!string.IsNullOrEmpty(extraKey))
+        {
+            str += $"_{extraKey}";
+        }
+
+        var keyDoc = Encoding.UTF8.GetBytes(str)
+                             .AsEnumerable()
+                             .Concat(machinePseudoKeys.GetMachineConstant())
+                             .ToArray();
+
+        return DocumentServiceConnector.GenerateRevisionId(Hasher.Base64Hash(keyDoc, HashAlg.SHA256));
+    }
+
+    public string GetDocSubmitKeyAsync(string key)
+    {
+        var rnd = Guid.NewGuid();
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes($"submit_{rnd}_{key}")).TrimEnd('=');
+    }
+
+    public bool IsDocSubmitKey(string docKey, string key)
+    {
+        var submitKey = Encoding.UTF8.GetString(Convert.FromBase64String(key.Base64FromUrlSafe()));
+
+        var keySplit = submitKey.Split(Convert.ToChar("_"), 3);
+
+        if (keySplit.Length == 3 && keySplit[0] == "submit" && docKey.Equals(keySplit[2]))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    public async Task CheckUsersForDropAsync<T>(File<T> file)
+    {
+        var usersDrop = new List<string>();
+
+        foreach (var uid in await fileTracker.GetEditingByAsync(file.Id))
+        {
+            if (!await userManager.UserExistsAsync(uid))
+            {
+                usersDrop.Add(uid.ToString());
+                continue;
+            }
+
+            if (!await fileSecurity.CanEditAsync(file, uid)
+                && !await fileSecurity.CanCustomFilterEditAsync(file, uid)
+                && !await fileSecurity.CanReviewAsync(file, uid)
+                && !await fileSecurity.CanFillFormsAsync(file, uid)
+                && !await fileSecurity.CanCommentAsync(file, uid))
+            {
+                usersDrop.Add(uid.ToString());
+            }
+        }
+
+        if (usersDrop.Count == 0)
+        {
+            return;
+        }
+
+        var fileStable = file;
+        if (file.Forcesave != ForcesaveType.None)
+        {
+            var fileDao = daoFactory.GetFileDao<T>();
+            fileStable = await fileDao.GetFileStableAsync(file.Id, file.Version);
+        }
+
+        var docKey = await GetDocKeyAsync(fileStable);
+
+        await DropUserAsync(docKey, usersDrop, file.Id);
+    }
+
+    public async Task<bool> DropUserAsync(string docKeyForTrack, List<string> users, object fileId = null)
+    {
+        return await documentServiceConnector.CommandAsync(CommandMethod.Drop, docKeyForTrack, fileId, null, users);
+    }
+
+    public async Task<bool> RenameFileAsync<T>(File<T> file, IFileDao<T> fileDao)
+    {
+        if (!fileUtility.CanWebView(file.Title)
+            && !fileUtility.CanWebCustomFilterEditing(file.Title)
+            && !fileUtility.CanWebEdit(file.Title)
+            && !fileUtility.CanWebReview(file.Title)
+            && !fileUtility.CanWebRestrictedEditing(file.Title)
+            && !fileUtility.CanWebComment(file.Title))
+        {
+            return true;
+        }
+
+        var fileStable = file.Forcesave == ForcesaveType.None ? file : await fileDao.GetFileStableAsync(file.Id, file.Version);
+        var docKeyForTrack = await GetDocKeyAsync(fileStable);
+
+        var meta = new MetaData { Title = file.Title };
+
+        return await documentServiceConnector.CommandAsync(CommandMethod.Meta, docKeyForTrack, file.Id, meta: meta);
+    }
+
+    public async Task<Folder<T>> GetRootFolderAsync<T>(File<T> fileEntry)
+    {
+        var folderDao = daoFactory.GetFolderDao<T>();
+        var folder = await folderDao.GetFolderAsync(fileEntry.ParentId);
+        if (folder.IsRoom || folder.FolderType is FolderType.FormFillingFolderInProgress or FolderType.FormFillingFolderDone)
+        {
+            return folder;
+        }
+
+        var (rId, _, _) = await folderDao.GetParentRoomInfoFromFileEntryAsync(folder);
+        if (int.TryParse(rId.ToString(), out var roomId) && roomId != -1)
+        {
+            var room = await folderDao.GetFolderAsync((T)Convert.ChangeType(roomId, typeof(T)));
+            if (room.FolderType is FolderType.FillingFormsRoom or FolderType.VirtualDataRoom)
+            {
+                return room;
+            }
+        }
+
+        if (folder.RootFolderType == FolderType.USER)
+        {
+            return await folderDao.GetRootFolderAsync(folder.Id);
+        }
+
+        return folder;
+    }
+
+    public async Task<FormOpenSetup<T>> GetFormOpenSetupForFillingRoomAsync<T>(File<T> file, Folder<T> rootFolder, EditorType editorType, bool edit, EntryManager entryManager)
+    {
+        var result = new FormOpenSetup<T>();
+        var fileDao = daoFactory.GetFileDao<T>();
+        var properties = await fileDao.GetProperties(file.Id);
+        var linkDao = daoFactory.GetLinkDao<T>();
+
+        result.CanStartFilling = false;
+
+        if (securityContext.CurrentAccount.ID.Equals(ASC.Core.Configuration.Constants.Guest.ID))
+        {
+            if (properties?.FormFilling?.StartFilling != true)
+            {
+                throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException_ReadFile);
+            }
+
+            result.CanFill = true;
+            result.IsSubmitOnly = true;
+            result.FillingSessionId = FileConstant.AnonFillingSession + Guid.NewGuid();
+            result.EditorType = editorType == EditorType.Mobile ? editorType : EditorType.Embedded;
+            result.DisableEmbeddedConfig = editorType != EditorType.Mobile;
+            return result;
+        }
+
+        if (edit)
+        {
+            result.CanEdit = true;
+            result.EditorType = editorType;
+            result.CanStartFilling = true;
+            return result;
+        }
+
+        if (!await fileSecurity.CanFillFormsAsync(rootFolder))
+        {
+            return result;
+        }
+
+        if (properties?.FormFilling?.StartFilling != true)
+        {
+            if (!await fileSecurity.CanStartFillingAsync(file, securityContext.CurrentAccount.ID))
+            {
+                throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException_ReadFile);
+            }
+
+            result.CanEdit = true;
+            result.CanStartFilling = true;
+            return result;
+        }
+
+        var originalFormId = !Equals(properties.FormFilling.OriginalFormId, default(T)) ? properties.FormFilling.OriginalFormId : file.Id;
+        var linkedId = await linkDao.GetLinkedAsync(originalFormId);
+        if (Equals(linkedId, default(T)) && await fileTracker.IsEditingAsync(originalFormId))
+        {
+            return result;
+        }
+
+        var formDraft = !Equals(linkedId, default(T)) ? await fileDao.GetFileAsync(linkedId) : (await entryManager.GetFillFormDraftAsync(file, rootFolder.Id)).file;
+
+        result.CanFill = true;
+        result.EditorType = editorType == EditorType.Mobile ? editorType : EditorType.Embedded;
+        result.DisableEmbeddedConfig = editorType != EditorType.Mobile;
+        result.Draft = formDraft;
+        result.FillingSessionId = $"{formDraft.Id}_{securityContext.CurrentAccount.ID}";
+
+        return result;
+    }
+    public FormOpenSetup<T> GetFormOpenSetupForFolderInProgress<T>(File<T> file, EditorType editorType)
+    {
+        return new FormOpenSetup<T>
+        {
+            CanEdit = false,
+            CanFill = true,
+            FillingSessionId = $"{file.Id}_{securityContext.CurrentAccount.ID}",
+            EditorType = editorType == EditorType.Mobile ? editorType : EditorType.Embedded,
+            DisableEmbeddedConfig = editorType != EditorType.Mobile
+        };
+    }
+    public FormOpenSetup<T> GetFormOpenSetupForFolderDone<T>(EditorType editorType)
+    {
+        return new FormOpenSetup<T>
+        {
+            CanEdit = false,
+            CanFill = false,
+            EditorType = editorType
+        };
+    }
+    public async Task<FormOpenSetup<T>> GetFormOpenSetupForVirtualDataRoomAsync<T>(File<T> file, Folder<T> room, EditorType editorType)
+    {
+        var fileDao = daoFactory.GetFileDao<T>();
+        var (currentStep, myRoles) = await fileDao.GetUserFormRoles(file.Id, securityContext.CurrentAccount.ID);
+
+        var result = new FormOpenSetup<T>
+        {
+            CanEdit = false,
+            CanFill = true,
+            CanEditRoom = await fileSecurity.CanEditRoomAsync(room)
+        };
+
+        if (currentStep != -1)
+        {
+            if (myRoles.Count == 0)
+            {
+                result.CanFill = false;
+                result.CanStartFilling = false;
+                return result;
+            }
+            result.HasRole = true;
+            var role = myRoles.FirstOrDefault(role => !role.Submitted && currentStep == role.Sequence);
+            if (role != null)
+            {
+                result.RoleName = role.RoleName;
+                if (role.OpenedAt.Equals(DateTime.MinValue))
+                {
+                    role.OpenedAt = DateTime.UtcNow;
+                    await fileDao.ChangeUserFormRoleAsync(file.Id, role);
+                }
+            }
+            else
+            {
+                role = myRoles.LastOrDefault();
+                result.RoleName = role.RoleName;
+            }
+            if (file.IsCompletedForm)
+            {
+                result.EditorType = editorType;
+            }
+            else
+            {
+                result.EditorType = editorType == EditorType.Mobile ? editorType : EditorType.Embedded;
+                result.DisableEmbeddedConfig = editorType != EditorType.Mobile;
+            }
+        }
+        else
+        {
+            var canEdit = await fileSecurity.CanEditAsync(file);
+            var canFill = await fileSecurity.CanFillFormsAsync(file);
+
+            result.CanEdit = canEdit;
+            result.CanFill = canFill;
+            result.CanEditRoom = await fileSecurity.CanEditRoomAsync(room);
+            result.EditorType = !canEdit && canFill && editorType != EditorType.Mobile
+                        ? EditorType.Embedded
+                        : editorType;
+        }
+        return result;
+    }
+
+    public async Task<FormOpenSetup<T>> GetFormOpenSetupForPublicRoomAsync<T>(File<T> file, EditorType editorType)
+    {
+        var canEdit = await fileSecurity.CanEditAsync(file);
+        var canFill = await fileSecurity.CanFillFormsAsync(file);
+
+        return new FormOpenSetup<T>
+        {
+            CanEdit = canEdit,
+            CanFill = canFill,
+            EditorType = !canEdit && canFill && editorType != EditorType.Mobile
+                        ? EditorType.Embedded
+                        : editorType
+        };
+    }
+
+    public async Task<FormOpenSetup<T>> GetFormOpenSetupForUserFolderAsync<T>(File<T> file, EditorType editorType, bool edit, bool fill)
+    {
+        var canEdit = await fileSecurity.CanEditAsync(file);
+        var canFill = await fileSecurity.CanFillFormsAsync(file);
+
+        FormOpenSetup<T> result;
+        if (file.CreateBy == securityContext.CurrentAccount.ID)
+        {
+            result = new FormOpenSetup<T>
+            {
+                CanEdit = !fill,
+                CanFill = fill || canFill,
+                CanStartFilling = true,
+                EditorType = editorType
+            };
+        }
+        else
+        {
+            result = new FormOpenSetup<T>
+            {
+                CanEdit = canEdit,
+                CanFill = canFill,
+                CanStartFilling = false,
+                EditorType = !edit && (fill || canFill) && editorType != EditorType.Mobile
+                            ? EditorType.Embedded
+                            : editorType
+            };
+        }
+        return result;
+    }
+}

@@ -1,0 +1,214 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.ApiModels.ResponseDto;
+
+/// <summary>
+/// The LDAP settings parameters.
+/// </summary>
+/// <example>
+/// {
+///   "enableLdapAuthentication": true,
+///   "disableEmailVerification": true,
+///   "startTls": true,
+///   "ssl": true,
+///   "sendWelcomeEmail": true,
+///   "server": "ldap.example.com",
+///   "portNumber": 1,
+///   "userFilter": "(uid=*)",
+///   "loginAttribute": "sAMAccountName",
+///   "ldapMapping": {},
+///   "groupMembership": true,
+///   "userAttribute": "memberOf",
+///   "groupFilter": "(objectClass=posixGroup)",
+///   "groupAttribute": "member",
+///   "groupNameAttribute": "Example Name",
+///   "authentication": true,
+///   "login": "admin@example.com",
+///   "password": "********",
+///   "acceptCertificate": true,
+///   "isDefault": true
+/// }
+/// </example>
+public class LdapSettingsDto
+{
+    /// <summary>
+    /// Specifies whether the LDAP authentication is active in the system.
+    /// </summary>
+    /// <example>true</example>
+    public bool EnableLdapAuthentication { get; set; }
+
+    /// <summary>
+    /// Specifies if the email verification requirement is enabled for the LDAP users or not.
+    /// </summary>
+    public bool DisableEmailVerification { get; set; }
+
+    /// <summary>
+    /// Specifies whether the StartTLS (Transport Layer Security) protocol for secure LDAP communication is enabled or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool StartTls { get; set; }
+
+    /// <summary>
+    /// Specifies whether the SSL (Secure Sockets Layer) encryption is enabled for the LDAP communication or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Ssl { get; set; }
+
+    /// <summary>
+    /// Specifies whether the automatic welcome email dispatch to the new LDAP users is enabled or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool SendWelcomeEmail { get; set; }
+
+    /// <summary>
+    /// The LDAP server's hostname or IP address.
+    /// </summary>
+    /// <example>ldap.example.com</example>
+    public string Server { get; set; }
+
+    /// <summary>
+    /// The absolute path to the top level directory containing users for the import.
+    /// </summary>
+    // ReSharper disable once InconsistentNaming
+    public string UserDN { get; set; }
+
+    /// <summary>
+    /// The port number.
+    /// </summary>
+    /// <example>1</example>
+    public int PortNumber { get; set; }
+
+    /// <summary>
+    /// The user filter value to import the users who correspond to the specified search criteria. The default filter value (uid=*) allows importing all users.
+    /// </summary>
+    /// <example>(uid=*)</example>
+    public string UserFilter { get; set; }
+
+    /// <summary>
+    /// The attribute in a user record that corresponds to the login that LDAP server users will use to log in to MATICONOFFICE.
+    /// </summary>
+    /// <example>sAMAccountName</example>
+    public string LoginAttribute { get; set; }
+
+    /// <summary>
+    /// The correspondence between the user data fields on the portal and the attributes in the LDAP server user record.
+    /// </summary>
+    /// <example>{}</example>
+    public Dictionary<MappingFields, string> LdapMapping { get; set; }
+
+    /// <summary>
+    /// The group access rights.
+    /// </summary>
+    //ToDo: use SId instead of group name
+    public Dictionary<AccessRight, string> AccessRights { get; set; }
+
+    /// <summary>
+    /// Specifies if the groups from the LDAP server are added to the portal or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool GroupMembership { get; set; }
+
+    /// <summary>
+    /// The absolute path to the top level directory containing groups for the import.
+    /// </summary>
+    // ReSharper disable once InconsistentNaming
+    public string GroupDN { get; set; }
+
+    /// <summary>
+    /// The attribute that determines whether the user is a member of the groups.
+    /// </summary>
+    /// <example>memberOf</example>
+    public string UserAttribute { get; set; }
+
+    /// <summary>
+    /// The group filter value to import the groups which correspond to the specified search criteria. The default filter value (objectClass=posixGroup) allows importing all groups.
+    /// </summary>
+    /// <example>(objectClass=posixGroup)</example>
+    public string GroupFilter { get; set; }
+
+    /// <summary>
+    /// The attribute that specifies the users that the group includes.
+    /// </summary>
+    /// <example>member</example>
+    public string GroupAttribute { get; set; }
+
+    /// <summary>
+    /// The attribute that corresponds to a name of the group where the user is included.
+    /// </summary>
+    /// <example>Example Name</example>
+    public string GroupNameAttribute { get; set; }
+
+    /// <summary>
+    /// Specifies if the user has rights to read data from LDAP server or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Authentication { get; set; }
+
+    /// <summary>
+    /// The user login.
+    /// </summary>
+    /// <example>admin@example.com</example>
+    public string Login { get; set; }
+
+    /// <summary>
+    /// The user password.
+    /// </summary>
+    /// <example>********</example>
+    public string Password { get; set; }
+
+    /// <summary>
+    /// Specifies if the certificate is accepted or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool AcceptCertificate { get; set; }
+
+    /// <summary>
+    /// Specifies if the default LDAP settings are used or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool IsDefault { get; set; }
+}
+
+[Mapper(RequiredMappingStrategy = RequiredMappingStrategy.None, PropertyNameMappingStrategy = PropertyNameMappingStrategy.CaseInsensitive)]
+public static partial class LdapSettingsDtoMapper
+{
+    [MapProperty(nameof(LdapSettings.Server), nameof(LdapSettingsDto.Server), Use = nameof(MapServer))]
+    public static partial LdapSettingsDto MapToSettingsDto(this LdapSettings source);
+
+    [UserMapping(Default = false)]
+    private static string MapServer(string source)
+    {
+        return source.Replace("LDAP://", "");
+    }
+}

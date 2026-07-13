@@ -1,0 +1,158 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.application.controller;
+
+import com.asc.registration.application.security.authentication.BasicSignatureTokenPrincipal;
+import com.asc.registration.service.ports.input.service.ScopeApplicationService;
+import com.asc.registration.service.transfer.response.ScopeResponse;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import java.util.LinkedHashSet;
+import java.util.stream.Collectors;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/** Controller class for managing OAuth2 scopes. */
+@Tag(
+    name = "Scope Management",
+    description = "APIs for retrieving OAuth2 scopes and their permissions")
+@Slf4j
+@RestController
+@RequestMapping(
+    value = {"${spring.application.web.api}/oauth2/scopes", "${spring.application.web.api}/scopes"},
+    produces = {MediaType.APPLICATION_JSON_VALUE})
+@RequiredArgsConstructor
+public class ScopeQueryController {
+
+  /** The service for managing OAuth2 scopes. */
+  private final ScopeApplicationService scopeApplicationService;
+
+  /**
+   * Retrieves a list of available OAuth2 scopes for the specified tenant.
+   *
+   * @param principal the authenticated principal containing tenant information
+   * @return a response entity containing an ordered list of scope responses
+   */
+  @GetMapping
+  @RateLimiter(name = "globalRateLimiter")
+  @Operation(
+      summary = "List available OAuth2 scopes",
+      description =
+          "Retrieves a list of all available OAuth2 scopes for the specified tenant. "
+              + "The scopes define the permissions that can be requested by OAuth2 clients. "
+              + "The list is ordered alphabetically, with the 'openid' scope always appearing first.",
+      tags = {"Scope Management"},
+      security = @SecurityRequirement(name = "x-signature"),
+      responses = {
+        @ApiResponse(
+            responseCode = "200",
+            description = "Scopes successfully retrieved",
+            content =
+                @Content(
+                    mediaType = MediaType.APPLICATION_JSON_VALUE,
+                    schema =
+                        @Schema(
+                            implementation = ScopeResponse.class,
+                            type = "array",
+                            description = "List of OAuth2 scopes"),
+                    examples =
+                        @ExampleObject(
+                            value =
+                                """
+                    [
+                      {
+                        "name": "scope_name",
+                        "type": "scope_type",
+                        "group": "scope_group"
+                      }
+                    ]
+                    """))),
+        @ApiResponse(
+            responseCode = "400",
+            description = "Invalid request parameters",
+            content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+        @ApiResponse(
+            responseCode = "403",
+            description = "Insufficient permissions to list scopes",
+            content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+        @ApiResponse(
+            responseCode = "429",
+            description = "Too many requests - rate limit exceeded",
+            content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+        @ApiResponse(
+            responseCode = "500",
+            description = "Internal server error occurred",
+            content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+      })
+  public ResponseEntity<Iterable<ScopeResponse>> getScopes(
+      @AuthenticationPrincipal BasicSignatureTokenPrincipal principal) {
+    MDC.put("tenant_id", String.valueOf(principal.getTenantId()));
+    MDC.put("tenant_url", principal.getTenantUrl());
+    log.info("Received a request to list scopes");
+
+    var scopes =
+        scopeApplicationService.getScopes().stream()
+            .map(
+                scope ->
+                    ScopeResponse.builder()
+                        .name(scope.getName())
+                        .type(scope.getType())
+                        .group(scope.getGroup())
+                        .build())
+            .sorted(
+                (s1, s2) -> {
+                  if (s1.getName().equalsIgnoreCase("openid")) return 1;
+                  if (s2.getName().equalsIgnoreCase("openid")) return -1;
+                  return s1.getName().compareToIgnoreCase(s2.getName());
+                })
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+
+    MDC.clear();
+    return ResponseEntity.ok(scopes);
+  }
+}

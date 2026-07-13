@@ -1,0 +1,392 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Data.Backup.Services;
+
+[Singleton]
+public class BackupWorker(
+    IDistributedTaskQueueFactory queueFactory,
+    IServiceProvider serviceProvider,
+    TempPath tempPath,
+    IDistributedLockProvider distributedLockProvider)
+{
+    public const string LockKey = "lock_backup";
+
+    public string TempFolder { get; } = Path.Combine(tempPath.GetTempPath(), "backup");
+
+    private DistributedTaskQueue<BackupProgressItem> _backupProgressQueue = queueFactory.CreateQueue<BackupProgressItem>();
+    private DistributedTaskQueue<RestoreProgressItem> _restoreProgressQueue = queueFactory.CreateQueue<RestoreProgressItem>();
+    private DistributedTaskQueue<TransferProgressItem> _transferProgressQueue = queueFactory.CreateQueue<TransferProgressItem>();
+    private int _limit;
+    private string _upgradesPath;
+
+    public void Start(BackupSettings settings)
+    {
+        if (!Directory.Exists(TempFolder))
+        {
+            Directory.CreateDirectory(TempFolder);
+        }
+
+        _limit = settings.Limit;
+        _upgradesPath = settings.UpgradesPath;
+    }
+
+    public async Task StopAsync()
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            if (_backupProgressQueue != null)
+            {
+                var tasks = await _backupProgressQueue.GetAllTasks(DistributedTaskQueue<BackupProgressItem>.INSTANCE_ID);
+
+                foreach (var t in tasks)
+                {
+                    await _backupProgressQueue.DequeueTask(t.Id);
+                }
+
+                _backupProgressQueue = null;
+            }
+
+            if (_restoreProgressQueue != null)
+            {
+                var tasks = await _restoreProgressQueue.GetAllTasks(DistributedTaskQueue<BackupProgressItem>.INSTANCE_ID);
+
+                foreach (var t in tasks)
+                {
+                    await _restoreProgressQueue.DequeueTask(t.Id);
+                }
+
+                _restoreProgressQueue = null;
+            }
+
+            if (_transferProgressQueue != null)
+            {
+                var tasks = await _transferProgressQueue.GetAllTasks(DistributedTaskQueue<BackupProgressItem>.INSTANCE_ID);
+
+                foreach (var t in tasks)
+                {
+                    await _transferProgressQueue.DequeueTask(t.Id);
+                }
+
+                _transferProgressQueue = null;
+            }
+        }
+    }
+
+    public async Task<BackupProgress> StartBackupAsync(StartBackupRequest request, bool enqueueTask = true, string taskId = null, int billingSessionId = 0, DateTime billingSessionExpire = default)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            BackupProgressItem item = null;
+            if (request.Dump)
+            {
+                item = (await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => t.Dump);
+            }
+            else
+            {
+                item = (await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == request.TenantId && !t.Dump);
+            }
+            if (item is { IsCompleted: true })
+            {
+                await _backupProgressQueue.DequeueTask(item.Id);
+                item = null;
+            }
+            if (item == null || (enqueueTask && item.Id == taskId && item.Status == DistributedTaskStatus.Created))
+            {
+
+                item = serviceProvider.GetService<BackupProgressItem>();
+
+                item.Init(request, false, TempFolder, _limit, billingSessionId, billingSessionExpire);
+
+                if (!string.IsNullOrEmpty(taskId))
+                {
+                    item.Id = taskId;
+                }
+
+                if (enqueueTask)
+                {
+                    await _backupProgressQueue.EnqueueTask(item);
+                }
+                else
+                {
+                    await _backupProgressQueue.PublishTask(item);
+                }
+            }
+
+            return ToBackupProgress(item);
+        }
+    }
+
+    public async Task StartScheduledBackupAsync(BackupSchedule schedule, int billingSessionId, DateTime billingSessionExpire)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            var item = (await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == schedule.TenantId);
+
+            if (item is { IsCompleted: true })
+            {
+                await _backupProgressQueue.DequeueTask(item.Id);
+                item = null;
+            }
+            if (item == null)
+            {
+                item = serviceProvider.GetService<BackupProgressItem>();
+
+                item.Init(schedule, true, TempFolder, _limit, billingSessionId, billingSessionExpire);
+
+                await _backupProgressQueue.EnqueueTask(item);
+            }
+        }
+    }
+
+    public async Task<bool> CancelBackupAsync(int tenantId)
+    {
+        var tasks = (await _backupProgressQueue.GetAllTasks()).Where(t => t.TenantId == tenantId && t.BackupProgressItemType == BackupProgressItemType.Backup);
+        var dequeued = false;
+
+        foreach (var t in tasks)
+        {
+            await _backupProgressQueue.DequeueTask(t.Id);
+            dequeued = true;
+        }
+
+        return dequeued;
+    }
+
+    public async Task<bool> CancelRestoreAsync(int tenantId)
+    {
+        var tasks = (await _restoreProgressQueue.GetAllTasks()).Where(t => (t.TenantId == tenantId || t.NewTenantId == tenantId) && t.BackupProgressItemType == BackupProgressItemType.Restore);
+        var dequeued = false;
+
+        foreach (var t in tasks)
+        {
+            // dump restoring cannot be cancelled
+            if (!t.Dump)
+            {
+                await _restoreProgressQueue.DequeueTask(t.Id);
+                dequeued = true;
+            }
+        }
+
+        return dequeued;
+    }
+
+    public async Task<BackupProgress> GetBackupProgressAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => !t.Dump && t.TenantId == tenantId && t.BackupProgressItemType == BackupProgressItemType.Backup));
+        }
+    }
+
+    public async Task<BackupProgress> GetDumpBackupProgressAsync()
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => t.Dump && t.BackupProgressItemType == BackupProgressItemType.Backup));
+        }
+    }
+
+    public async Task<BackupProgress> GetTransferProgressAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _transferProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == tenantId));
+        }
+    }
+
+    public async Task<BackupProgress> GetRestoreProgressAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _restoreProgressQueue.GetAllTasks()).FirstOrDefault(t => !t.Dump && (t.TenantId == tenantId || t.NewTenantId == tenantId) && t.BackupProgressItemType == BackupProgressItemType.Restore));
+        }
+    }
+
+    public async Task<BackupProgress> GetAnyRestoreProgressAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _restoreProgressQueue.GetAllTasks()).FirstOrDefault(t => (t.Dump || t.TenantId == tenantId || t.NewTenantId == tenantId) && t.BackupProgressItemType == BackupProgressItemType.Restore));
+        }
+    }
+
+    public async Task<BackupProgress> GetDumpRestoreProgressAsync()
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            return ToBackupProgress((await _restoreProgressQueue.GetAllTasks()).FirstOrDefault(t => t.Dump && t.BackupProgressItemType == BackupProgressItemType.Restore));
+        }
+    }
+
+
+    public async Task ResetBackupErrorAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            var progress = (await _backupProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == tenantId);
+            progress?.Exception = null;
+        }
+    }
+
+    public async Task ResetRestoreErrorAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            var progress = (await _restoreProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == tenantId);
+            progress?.Exception = null;
+        }
+    }
+
+    public async Task<BackupProgress> StartRestoreAsync(StartRestoreRequest request, bool enqueueTask = true, string taskId = null)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            var item = (await _restoreProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == request.TenantId);
+            if (item is { IsCompleted: true })
+            {
+                await _restoreProgressQueue.DequeueTask(item.Id);
+                item = null;
+            }
+
+            if (item == null || (enqueueTask && item.Id == taskId && item.Status == DistributedTaskStatus.Created))
+            {
+
+                item = serviceProvider.GetService<RestoreProgressItem>();
+
+                item.Init(request, TempFolder, _upgradesPath);
+
+                if (!string.IsNullOrEmpty(taskId))
+                {
+                    item.Id = taskId;
+                }
+
+                if (enqueueTask)
+                {
+                    await _restoreProgressQueue.EnqueueTask(item);
+                }
+                else
+                {
+                    await _restoreProgressQueue.PublishTask(item);
+                }
+            }
+            return ToBackupProgress(item);
+        }
+    }
+
+    public async Task<BackupProgress> StartTransferAsync(int tenantId, string targetRegion, bool notify)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync(LockKey))
+        {
+            var item = (await _transferProgressQueue.GetAllTasks()).FirstOrDefault(t => t.TenantId == tenantId);
+            if (item is { IsCompleted: true })
+            {
+                await _transferProgressQueue.DequeueTask(item.Id);
+                item = null;
+            }
+
+            if (item == null)
+            {
+                item = serviceProvider.GetService<TransferProgressItem>();
+                item.Init(targetRegion, tenantId, TempFolder, _limit, notify);
+
+                await _transferProgressQueue.EnqueueTask(item);
+            }
+
+            return ToBackupProgress(item);
+        }
+    }
+
+    internal static string GetBackupHashSHA(string path)
+    {
+        using var sha256 = SHA256.Create();
+        using var fileStream = File.OpenRead(path);
+        fileStream.Position = 0;
+        var hash = sha256.ComputeHash(fileStream);
+        return BitConverter.ToString(hash).Replace("-", string.Empty);
+    }
+
+    internal static async Task<string> GetBackupHashMD5Async(string path, long chunkSize)
+    {
+        await using var fileStream = File.OpenRead(path);
+        var multipartSplitCount = 0;
+        var splitCount = fileStream.Length / chunkSize;
+        var mod = (int)(fileStream.Length - chunkSize * splitCount);
+        IEnumerable<byte> concatHash = [];
+
+        for (var i = 0; i < splitCount; i++)
+        {
+            var offset = i == 0 ? 0 : chunkSize * i;
+            var chunk = await GetChunkAsync(fileStream, offset, (int)chunkSize);
+            var hash = MD5.HashData(chunk);
+            concatHash = concatHash.Concat(hash);
+            multipartSplitCount++;
+        }
+        if (mod != 0)
+        {
+            var chunk = await GetChunkAsync(fileStream, chunkSize * splitCount, mod);
+            var hash = MD5.HashData(chunk);
+            concatHash = concatHash.Concat(hash);
+            multipartSplitCount++;
+        }
+        var multipartHash = BitConverter.ToString(MD5.HashData(concatHash.ToArray())).Replace("-", string.Empty);
+        return multipartHash + "-" + multipartSplitCount;
+    }
+
+    private static async Task<byte[]> GetChunkAsync(FileStream sourceStream, long offset, int count)
+    {
+        var buffer = new byte[count];
+        sourceStream.Position = offset;
+        _ = await sourceStream.ReadAsync(buffer.AsMemory(0, count));
+        return buffer;
+    }
+
+    private BackupProgress ToBackupProgress(BaseBackupProgressItem progressItem)
+    {
+        return progressItem?.ToBackupProgress();
+    }
+
+    public async Task<bool> IsBackupInstanceTooBusy()
+    {
+        var instanceTasks = await _backupProgressQueue.GetAllTasks(DistributedTaskQueue<BackupProgressItem>.INSTANCE_ID);
+
+        return _backupProgressQueue.MaxThreadsCount < instanceTasks.Count;
+    }
+
+    public async Task<bool> IsRestoreInstanceTooBusy()
+    {
+        var instanceTasks = await _restoreProgressQueue.GetAllTasks(DistributedTaskQueue<BackupProgressItem>.INSTANCE_ID);
+
+        return _restoreProgressQueue.MaxThreadsCount < instanceTasks.Count;
+    }
+}

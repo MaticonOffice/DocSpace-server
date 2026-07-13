@@ -1,0 +1,17 @@
+{
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "applicationUrl": "http://localhost:5012",
+      "launchUrl": "http://localhost:5012",
+      "environmentVariables": {
+        "$STORAGE_ROOT": "../../../../Data",
+        "log__name": "backup",
+        "log__dir": "../../../../Logs",
+        "core__products__folder": "../../../products",
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

@@ -1,0 +1,202 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Api;
+
+[ConstraintRoute("int")]
+public class TagsControllerInternal(FileStorageService fileStorageService,
+        EntryManager entryManager,
+        FolderDtoHelper folderDtoHelper,
+        FileDtoHelper fileDtoHelper)
+    : TagsController<int>(fileStorageService, entryManager, folderDtoHelper, fileDtoHelper);
+
+public class TagsControllerThirdparty(FileStorageService fileStorageService,
+        EntryManager entryManager,
+        FolderDtoHelper folderDtoHelper,
+        FileDtoHelper fileDtoHelper)
+    : TagsController<string>(fileStorageService, entryManager, folderDtoHelper, fileDtoHelper);
+
+public abstract class TagsController<T>(FileStorageService fileStorageService,
+        EntryManager entryManager,
+        FolderDtoHelper folderDtoHelper,
+        FileDtoHelper fileDtoHelper)
+    : ApiControllerBase(folderDtoHelper, fileDtoHelper)
+{
+    /// <remarks>
+    /// Adds a file with the ID specified in the request to the "Recent" section.
+    /// </remarks>
+    /// <summary>Add a file to the "Recent" section</summary>
+    /// <path>api/2.0/files/file/{fileId}/recent</path>
+    [Tags("Files / Files")]
+    [SwaggerResponse(200, "New file information", typeof(FileDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [SwaggerResponse(404, "File not found")]
+    [HttpPost("file/{fileId}/recent")]
+    public async Task<FileDto<T>> AddFileToRecent(FileIdRequestDto<T> inDto)
+    {
+        var file = await fileStorageService.GetFileAsync(inDto.FileId, -1).NotFoundIfNull("File not found");
+
+        await entryManager.MarkAsRecent(file);
+
+        return await _fileDtoHelper.GetAsync(file);
+    }
+
+    /// <remarks>
+    /// Changes the favorite status of the file with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Change the file favorite status</summary>
+    /// <path>api/2.0/files/favorites/{fileId}</path>
+    [Tags("Files / Files")]
+    [SwaggerResponse(200, "Boolean value: true - the file is favorite, false - the file is not favorite", typeof(bool))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [HttpGet("favorites/{fileId}")]
+    public async Task<bool> ToggleFileFavorite(ToggleFileFavoriteRequestDto<T> inDto)
+    {
+        return await fileStorageService.ToggleFileFavoriteAsync(inDto.FileId, inDto.Favorite);
+    }
+}
+
+public class TagsControllerCommon(FileStorageService fileStorageService,
+        FolderDtoHelper folderDtoHelper,
+        FileDtoHelper fileDtoHelper)
+    : ApiControllerBase(folderDtoHelper, fileDtoHelper)
+{
+    /// <remarks>
+    /// Adds files and folders with the IDs specified in the request to the favorite list.
+    /// </remarks>
+    /// <summary>Add favorite files and folders</summary>
+    /// <path>api/2.0/files/favorites</path>
+    [Tags("Files / Operations")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [HttpPost("favorites")]
+    public async Task<bool> AddFavorites(BaseBatchRequestDto inDto)
+    {
+        var (folderIntIds, folderStringIds) = FileOperationsManager.GetIds(inDto.FolderIds);
+        var (fileIntIds, fileStringIds) = FileOperationsManager.GetIds(inDto.FileIds);
+
+        await fileStorageService.AddToFavoritesAsync(folderIntIds, fileIntIds);
+        await fileStorageService.AddToFavoritesAsync(folderStringIds, fileStringIds);
+
+        return true;
+    }
+
+    /// <remarks>
+    /// Adds files with the IDs specified in the request to the template list.
+    /// </remarks>
+    /// <summary>Add template files</summary>
+    /// <path>api/2.0/files/templates</path>
+    [Tags("Files / Files")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [HttpPost("templates")]
+    public async Task<bool> AddTemplates(TemplatesRequestDto inDto)
+    {
+        await fileStorageService.AddToTemplatesAsync(inDto.FileIds);
+
+        return true;
+    }
+
+    /// <remarks>
+    /// Removes files and folders with the IDs specified in the request from the favorite list. This method uses the body parameters.
+    /// </remarks>
+    /// <summary>Delete favorite files and folders (using body parameters)</summary>
+    /// <path>api/2.0/files/favorites</path>
+    [Tags("Files / Operations")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [HttpDelete("favorites")]
+    [Consumes("application/json")]
+    public async Task<bool> DeleteFavoritesFromBody([FromBody] BaseBatchRequestDto inDto)
+    {
+        return await DeleteFavorites(inDto);
+    }
+
+    /// <remarks>
+    /// Removes files and folders with the IDs specified in the request from the favorite list. This method uses the query parameters.
+    /// </remarks>
+    /// <summary>Delete favorite files and folders (using query parameters)</summary>
+    /// <path>api/2.0/files/favorites</path>
+    [Tags("Files / Operations")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [HttpDelete("favorites")]
+    public async Task<bool> DeleteFavoritesFromQuery([FromQuery][ModelBinder(BinderType = typeof(BaseBatchModelBinder))] BaseBatchRequestDto inDto)
+    {
+        return await DeleteFavorites(inDto);
+    }
+
+    /// <remarks>
+    /// Removes files with the IDs specified in the request from the template list.
+    /// </remarks>
+    /// <summary>Delete template files</summary>
+    /// <path>api/2.0/files/templates</path>
+    [Tags("Files / Files")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [HttpDelete("templates")]
+    public async Task<bool> DeleteTemplates(DeleteTemplateFilesRequestDto inDto)
+    {
+        await fileStorageService.DeleteTemplatesAsync(inDto.FileIds);
+
+        return true;
+    }
+
+    /// <remarks>
+    /// Removes files with the IDs specified in the request from the "Recent" section.
+    /// </remarks>
+    /// <summary>Delete recent files</summary>
+    /// <path>api/2.0/files/recent</path>
+    [Tags("Files / Files")]
+    [SwaggerResponse(200, "No content", typeof(NoContentResult))]
+    [HttpDelete("recent")]
+    public async Task<NoContentResult> DeleteRecent(BaseBatchRequestDto inDto)
+    {
+        var (folderIntIds, folderStringIds) = FileOperationsManager.GetIds(inDto.FolderIds);
+        var (fileIntIds, _) = FileOperationsManager.GetIds(inDto.FileIds);
+
+        var t1 = fileStorageService.DeleteFromRecentAsync(folderIntIds, fileIntIds);
+        var t2 = fileStorageService.DeleteFromRecentAsync(folderStringIds, []);
+
+        await Task.WhenAll(t1, t2);
+
+        return NoContent();
+    }
+
+    private async Task<bool> DeleteFavorites(BaseBatchRequestDto inDto)
+    {
+        var (folderIntIds, folderStringIds) = FileOperationsManager.GetIds(inDto.FolderIds);
+        var (fileIntIds, fileStringIds) = FileOperationsManager.GetIds(inDto.FileIds);
+
+        await fileStorageService.DeleteFavoritesAsync(folderIntIds, fileIntIds);
+        await fileStorageService.DeleteFavoritesAsync(folderStringIds, fileStringIds);
+
+        return true;
+    }
+}

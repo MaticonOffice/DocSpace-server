@@ -1,0 +1,104 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+[Singleton]
+public class TempPath
+{
+    private readonly string _tempFolder;
+
+    public TempPath(IHostEnvironment hostEnvironment, IConfiguration configuration)
+    {
+        var rootFolder = AppContext.BaseDirectory;
+        if (string.IsNullOrEmpty(rootFolder))
+        {
+            rootFolder = Assembly.GetEntryAssembly().Location;
+        }
+
+        _tempFolder = configuration["web:temp"] ?? CrossPlatform.PathCombine(hostEnvironment.ContentRootPath, "temp");
+        if (!Path.IsPathRooted(_tempFolder))
+        {
+            _tempFolder = Path.GetFullPath(Path.Combine(rootFolder, _tempFolder));
+        }
+
+        if (!Directory.Exists(_tempFolder))
+        {
+            Directory.CreateDirectory(_tempFolder);
+        }
+    }
+
+    public string GetTempPath()
+    {
+        return _tempFolder;
+    }
+
+    public string GetTempFileName(string ext = "")
+    {
+        FileStream f = null;
+        string path;
+        var count = 0;
+
+        do
+        {
+            path = Path.Combine(_tempFolder, Path.GetRandomFileName());
+
+            if (!string.IsNullOrEmpty(ext))
+            {
+                path = Path.ChangeExtension(path, ext);
+            }
+
+            try
+            {
+                using (f = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read))
+                {
+                    return path;
+                }
+            }
+            catch (IOException ex)
+            {
+                if (ex.HResult != -2147024816 || count++ > 65536)
+                {
+                    throw;
+                }
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                if (count++ > 65536)
+                {
+                    throw new IOException(ex.Message, ex);
+                }
+            }
+        } while (f == null);
+
+        return path;
+    }
+}

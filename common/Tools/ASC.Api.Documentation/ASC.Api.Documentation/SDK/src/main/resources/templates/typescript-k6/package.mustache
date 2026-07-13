@@ -1,0 +1,45 @@
+﻿{
+  "name": "{{packageName}}",
+  "version": "{{packageVersion}}",
+  "description": "A simple TypeScript SDK for integrating with the Maticon Office DocSpace API",
+  "homepage": "https://www.maticonoffice.ru",
+  "author": "Maticon Office LLC <integration@maticonoffice.ru> (https://www.maticonoffice.ru)",
+  "maintainers": [
+    "Maticon Office LLC <integration@maticonoffice.ru> (https://www.maticonoffice.ru)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+{{repositoryUrl}}.git"
+  },
+  "bugs": {
+    "url": "{{repositoryUrl}}/issues",
+    "email": "support@maticonoffice.ru"
+  },
+  "keywords": [
+    "maticonoffice",
+    "docspace",
+    "sdk"
+  ],
+  "license": "{{licenseName}}",
+  "main": "./dist/index.js",
+  "typings": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+{{#supportsES6}}
+  "module": "./dist/esm/index.js",
+  "sideEffects": false,
+{{/supportsES6}}
+  "scripts": {
+    "build": "tsc{{#supportsES6}} && tsc -p tsconfig.esm.json{{/supportsES6}}",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@types/k6": "1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2",
+    "@types/whatwg-url": "^13.0.0",
+    "typescript": "5.9.2"
+  }
+}

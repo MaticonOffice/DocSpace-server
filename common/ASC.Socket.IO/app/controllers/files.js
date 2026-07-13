@@ -1,0 +1,273 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+module.exports = (files) => {
+  const router = require("express").Router();
+
+  router.post("/start-edit", (req, res) => {
+    files.startEdit(req.body);
+    res.end();
+  });
+
+  router.post("/stop-edit", (req, res) => {
+    files.stopEdit(req.body);
+    res.end();
+  });
+
+  router.post("/create-file", (req, res) => {
+    files.createFile(req.body);
+    res.end();
+  });
+
+  router.post("/create-form", (req, res) => {
+    files.createForm(req.body);
+    res.end();
+  });
+
+  router.post("/create-folder", (req, res) => {
+    files.createFolder(req.body);
+    res.end();
+  });
+
+  router.post("/update-file", (req, res) => {
+    files.updateFile(req.body);
+    res.end();
+  });
+
+  router.post("/update-folder", (req, res) => {
+    files.updateFolder(req.body);
+    res.end();
+  });
+
+  router.post("/delete-file", (req, res) => {
+    files.deleteFile(req.body);
+    res.end();
+  });
+
+  router.post("/delete-folder", (req, res) => {
+    files.deleteFolder(req.body);
+    res.end();
+  });
+
+  router.post("/mark-as-new-file", (req, res) => {
+    files.markAsNewFiles(req.body);
+    res.end();
+  });
+
+  router.post("/mark-as-new-folder", (req, res) => {
+    files.markAsNewFolders(req.body);
+    res.end();
+  });
+
+  router.post("/change-quota-used-value", (req, res) => {
+    files.changeQuotaUsedValue(req.body);
+    res.end();
+  });
+
+  router.post("/change-quota-feature-value", (req, res) => {
+    files.changeQuotaFeatureValue(req.body);
+    res.end();
+  });
+
+  router.post("/change-user-quota-used-value", (req, res) => {
+    files.changeUserQuotaFeatureValue(req.body);
+    res.end();
+  });
+
+  router.post("/change-invitation-limit-value", (req, res) => {
+    files.changeInvitationLimitValue(req.body);
+    res.end();
+  });
+
+  router.post("/change-web-plugin", (req, res) => {
+    files.changeWebPlugin(req.body);
+    res.end();
+  });
+
+  router.post("/top-up-wallet", (req, res) => {
+    files.topUpWallet(req.body);
+    res.end();
+  });
+  
+  router.post("/update-history", (req, res) => {
+    files.updateHistory(req.body);
+    res.end();
+  });
+
+  router.post("/logout-session", (req, res) => {
+    files.logoutSession(req.body);
+    res.end();
+  });
+
+  router.post("/change-my-type", (req, res) => {
+    files.changeMyType(req.body);
+    res.end();
+  });
+
+  router.post("/add-user", (req, res) => {
+    files.addUser(req.body);
+    res.end();
+  });
+
+  router.post("/update-user", (req, res) => {
+    files.updateUser(req.body);
+    res.end();
+  });
+
+  router.post("/delete-user", (req, res) => {
+    files.deleteUser(req.body);
+    res.end();
+  });
+
+  router.post("/add-group", (req, res) => {
+    files.addGroup(req.body);
+    res.end();
+  });
+
+  router.post("/update-group", (req, res) => {
+    files.updateGroup(req.body);
+    res.end();
+  });
+
+  router.post("/delete-group", (req, res) => {
+    files.deleteGroup(req.body);
+    res.end();
+  });
+
+  router.post("/add-guest", (req, res) => {
+    files.addGuest(req.body);
+    res.end();
+  });
+
+  router.post("/update-guest", (req, res) => {
+    files.updateGuest(req.body);
+    res.end();
+  });
+
+  router.post("/telegram", (req, res) => {
+    files.connectTelegram(req.body);
+    res.end();
+  });
+
+  router.post("/update-telegram", (req, res) => {
+    files.updateTelegram(req.body);
+    res.end();
+  });
+
+  router.post("/delete-guest", (req, res) => {
+    files.deleteGuest(req.body);
+    res.end();
+  });
+
+  router.post("/backup-progress", (req, res) => {
+    files.backupProgress(req.body);
+    res.end();
+  });
+
+  router.post("/restore-progress", (req, res) => {
+    files.restoreProgress(req.body);
+    res.end();
+  });
+
+  router.post("/end-backup", (req, res) => {
+    files.endBackup(req.body);
+    res.end();
+  });
+
+  router.post("/end-restore", (req, res) => {
+    files.endRestore(req.body);
+    res.end();
+  });
+
+  router.post("/encryption-progress", (req, res) => {
+    files.encryptionProgress(req.body);
+    res.end();
+  });
+
+  router.post("/self-restriction-file", (req, res) => {
+    files.selfRestrictionForFile(req.body);
+    res.end();
+  });
+
+  router.post("/self-restriction-folder", (req, res) => {
+    files.selfRestrictionForFolder(req.body);
+    res.end();
+  });
+
+  router.post("/commit-chat-message", (req, res) => {
+    files.commitChatMessage(req.body);
+    res.end();
+  });
+
+  router.post("/update-chat", (req, res) => {
+    files.updateChat(req.body);
+    res.end();
+  });
+
+  router.post("/chat-export", (req, res) => {
+    files.exportChat(req.body);
+    res.end();
+  });
+
+  router.post("/change-access-rights-file", (req, res) => {
+    files.changeAccessRightsForFile(req.body);
+    res.end();
+  });
+
+  router.post("/change-access-rights-folder", (req, res) => {
+    files.changeAccessRightsForFolder(req.body);
+    res.end();
+  });
+
+  router.post("/quota_exceeded", (req, res) => {
+     files.quotaExceeded(req.body);
+     res.end();
+  });
+
+  router.post("/change-ai-config", (req, res) => {
+    files.changeAiConfig(req.body);
+    res.end();
+  });
+
+  router.post("/change-external-sharing-settings", (req, res) => {
+    files.changeExternalSharingSettings(req.body);
+    res.end();
+  });
+
+  router.post("/external-db-settings", (req, res) => {
+    files.externalDbSettings(req.body);
+    res.end();
+  });
+
+  return router;
+};

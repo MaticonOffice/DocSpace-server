@@ -1,0 +1,132 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.authorization.application.security.oauth.jwks;
+
+import com.asc.authorization.application.mapper.KeyPairMapper;
+import com.asc.common.core.domain.value.KeyPairType;
+import com.nimbusds.jose.jwk.JWK;
+import com.nimbusds.jose.jwk.RSAKey;
+import java.security.*;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.InvalidKeySpecException;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+/**
+ * Generates RSA key pairs and constructs JSON Web Keys (JWKs).
+ *
+ * <p>This class provides methods for generating RSA key pairs and building JWKs from key objects or
+ * Base64-encoded key strings. It uses a default key size of 2048 bits for RSA keys.
+ */
+@Slf4j
+@Component(value = "rsa")
+@RequiredArgsConstructor
+public class RsaGenerator implements JwksKeyPairGenerator {
+  private final KeyPairMapper keyMapper;
+
+  /**
+   * Generates an RSA key pair.
+   *
+   * <p>This method uses the RSA algorithm to generate a 2048-bit key pair suitable for use in JSON
+   * Web Keys (JWKs).
+   *
+   * @return the generated RSA key pair.
+   * @throws NoSuchAlgorithmException if the RSA algorithm is not available in the current
+   *     environment.
+   */
+  public KeyPair generateKeyPair() throws NoSuchAlgorithmException {
+    log.info("Generating RSA JWK key pair");
+
+    try {
+      var keyPairGenerator = KeyPairGenerator.getInstance("RSA");
+      keyPairGenerator.initialize(2048);
+      return keyPairGenerator.generateKeyPair();
+    } catch (NoSuchAlgorithmException ex) {
+      log.error("Could not generate a JWK key pair", ex);
+      throw new NoSuchAlgorithmException("Failed to generate RSA key pair", ex);
+    }
+  }
+
+  /**
+   * Constructs a JWK from the provided public and private key objects.
+   *
+   * <p>This method creates an RSA JWK using the given public and private keys.
+   *
+   * @param id the key ID to associate with the JWK.
+   * @param publicKey the public key.
+   * @param privateKey the private key.
+   * @return the constructed {@link JWK}.
+   */
+  public JWK buildKey(String id, PublicKey publicKey, PrivateKey privateKey) {
+    return new RSAKey.Builder((RSAPublicKey) publicKey)
+        .privateKey((RSAPrivateKey) privateKey)
+        .keyID(id)
+        .build();
+  }
+
+  /**
+   * Constructs a JWK from the provided Base64-encoded public and private key strings.
+   *
+   * <p>This method decodes the provided key strings into {@link PublicKey} and {@link PrivateKey}
+   * objects and creates an RSA JWK.
+   *
+   * @param id the key ID to associate with the JWK.
+   * @param publicKey the Base64-encoded public key string.
+   * @param privateKey the Base64-encoded private key string.
+   * @return the constructed {@link JWK}.
+   * @throws NoSuchAlgorithmException if the RSA algorithm is not available in the current
+   *     environment.
+   * @throws InvalidKeySpecException if the provided key specifications are invalid.
+   */
+  public JWK buildKey(String id, String publicKey, String privateKey)
+      throws NoSuchAlgorithmException, InvalidKeySpecException {
+    var rsaPublicKey = (RSAPublicKey) keyMapper.toPublicKey(publicKey, "RSA");
+    var rsaPrivateKey = (RSAPrivateKey) keyMapper.toPrivateKey(privateKey, "RSA");
+
+    return new RSAKey.Builder(rsaPublicKey).privateKey(rsaPrivateKey).keyID(id).build();
+  }
+
+  /**
+   * Returns the type of key pair generated by this class.
+   *
+   * <p>This method indicates that the generator produces RSA key pairs.
+   *
+   * @return the {@link KeyPairType} indicating the RSA key pair type.
+   */
+  public KeyPairType type() {
+    return KeyPairType.RSA;
+  }
+}

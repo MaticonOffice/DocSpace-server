@@ -1,0 +1,657 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Files.Core.Services.WCFService.FileOperations;
+using ASC.Webhooks.Core.EF.Model;
+
+namespace ASC.Web.Files.Services.WCFService.FileOperations;
+
+[ProtoContract]
+public record FileDeleteOperationData<T> : FileOperationData<T>
+{
+    [ProtoMember(7)]
+    public bool IgnoreException { get; set; }
+
+    [ProtoMember(8)]
+    public bool Immediately { get; set; }
+
+    [ProtoMember(9)]
+    public bool IsEmptyTrash { get; set; }
+
+    [ProtoMember(10)]
+    public IEnumerable<int> FilesVersions { get; set; }
+
+    public FileDeleteOperationData()
+    {
+
+    }
+
+    public FileDeleteOperationData(
+        IEnumerable<T> folders,
+        IEnumerable<T> files,
+        IEnumerable<int> versions,
+        int tenantId,
+        Guid userId,
+        IDictionary<string, string> headers,
+        ExternalSessionSnapshot sessionSnapshot,
+        bool holdResult = true,
+        bool ignoreException = false,
+        bool immediately = false,
+        bool isEmptyTrash = false) : base(folders, files, tenantId, userId, headers, sessionSnapshot, holdResult)
+    {
+        IgnoreException = ignoreException;
+        Immediately = immediately;
+        IsEmptyTrash = isEmptyTrash;
+        FilesVersions = versions;
+    }
+}
+
+[Transient]
+public class FileDeleteOperation : ComposeFileOperation<FileDeleteOperationData<string>, FileDeleteOperationData<int>>
+{
+    public FileDeleteOperation() { }
+
+    public FileDeleteOperation(IServiceProvider serviceProvider) : base(serviceProvider) { }
+
+    public override FileOperationType FileOperationType { get; set; } = FileOperationType.Delete;
+
+    public override Task RunJob(CancellationToken cancellationToken)
+    {
+        DaoOperation = new FileDeleteOperation<int>(_serviceProvider, Data);
+        ThirdPartyOperation = new FileDeleteOperation<string>(_serviceProvider, ThirdPartyData);
+
+        return base.RunJob(cancellationToken);
+    }
+}
+
+internal class FileDeleteOperation<T> : FileOperation<FileDeleteOperationData<T>, T>
+{
+    private int _trashId;
+    private readonly bool _ignoreException;
+    private readonly bool _immediately;
+    private readonly bool _isEmptyTrash;
+    private readonly Dictionary<string, StringValues> _headers;
+    private readonly IEnumerable<int> _filesVersions;
+
+    public override FileOperationType FileOperationType { get; set; } = FileOperationType.Delete;
+
+    public FileDeleteOperation(IServiceProvider serviceProvider, FileDeleteOperationData<T> fileOperationData)
+    : base(serviceProvider, fileOperationData)
+    {
+        _ignoreException = fileOperationData.IgnoreException;
+        _immediately = fileOperationData.Immediately;
+        _headers = fileOperationData.Headers?.ToDictionary(x => x.Key, x => new StringValues(x.Value));
+        _isEmptyTrash = fileOperationData.IsEmptyTrash;
+        _filesVersions = fileOperationData.FilesVersions;
+    }
+
+    protected override int InitTotalProgressSteps()
+    {
+        if (_filesVersions != null && _filesVersions.Any() && Files.Count > 0)
+        {
+            return _filesVersions.Count();
+        }
+
+        return base.InitTotalProgressSteps();
+    }
+
+    protected override async Task DoJob(AsyncServiceScope serviceScope)
+    {
+        var folderDao = serviceScope.ServiceProvider.GetService<IFolderDao<int>>();
+        var filesMessageService = serviceScope.ServiceProvider.GetService<FilesMessageService>();
+        var tenantManager = serviceScope.ServiceProvider.GetService<TenantManager>();
+
+        await tenantManager.SetCurrentTenantAsync(CurrentTenantId);
+
+        var externalShare = serviceScope.ServiceProvider.GetRequiredService<ExternalShare>();
+        externalShare.Initialize(SessionSnapshot);
+        _trashId = await folderDao.GetFolderIDTrashAsync(true);
+
+        Folder<T> root = null;
+        if (0 < Folders.Count)
+        {
+            root = await FolderDao.GetRootFolderAsync(Folders[0]);
+        }
+        else if (0 < Files.Count)
+        {
+            root = await FolderDao.GetRootFolderByFileAsync(Files[0]);
+        }
+        if (root != null)
+        {
+            Result += $"folder_{root.Id}{SplitChar}";
+        }
+
+        if (_filesVersions != null && _filesVersions.Any() && Files.Count > 0)
+        {
+            await DeleteFileVersionAsync(Files.FirstOrDefault(), _filesVersions, serviceScope);
+        }
+        else
+        {
+            if (_isEmptyTrash)
+            {
+                await DeleteFilesAsync(Files, serviceScope, true);
+                await DeleteFoldersAsync(Folders, serviceScope, true);
+
+                var trash = await folderDao.GetFolderAsync(_trashId);
+                await filesMessageService.SendAsync(MessageAction.TrashEmptied, trash, _headers);
+            }
+            else
+            {
+                await DeleteFilesAsync(Files, serviceScope, true);
+                await DeleteFoldersAsync(Folders, serviceScope, true);
+            }
+        }
+    }
+
+    private async Task DeleteFoldersAsync(IEnumerable<T> folderIds, IServiceScope scope, bool isNeedSendActions = false, bool checkPermissions = true)
+    {
+        var scopeClass = scope.ServiceProvider.GetService<FileDeleteOperationScope>();
+        var socketManager = scope.ServiceProvider.GetService<SocketManager>();
+        var webhookManager = scope.ServiceProvider.GetService<WebhookManager>();
+        var fileSharing = scope.ServiceProvider.GetService<FileSharing>();
+        var authContext = scope.ServiceProvider.GetService<AuthContext>();
+        var notifyClient = scope.ServiceProvider.GetService<NotifyClient>();
+        var permissionsManager = scope.ServiceProvider.GetService<DeletePermissionsCheck<T>>();
+        var tenantQuotaFeatureStatHelper = scope.ServiceProvider.GetService<TenantQuotaFeatureStatHelper>();
+        var quotaSocketManager = scope.ServiceProvider.GetService<QuotaSocketManager>();
+
+        var (fileMarker, filesMessageService, roomLogoManager) = scopeClass;
+        roomLogoManager.EnableAudit = false;
+
+        var webhookTrigger = WebhookTrigger.All;
+        IEnumerable<DbWebhooksConfig> webhookConfigs = null;
+
+        foreach (var folderId in folderIds)
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+
+            // Intentional re-read: must use current folder state at execution time (TOCTOU mitigation).
+            // Pre-check was done before enqueue, but permissions/locks/existence may have changed.
+            var folder = await FolderDao.GetFolderAsync(folderId);
+            var isRoom = folder.IsRoom;
+
+            var canDelete = await FilesSecurity.CanDeleteAsync(folder);
+            checkPermissions = isRoom ? !canDelete : checkPermissions;
+
+            T canCalculate = default;
+
+            var errorMsg = await permissionsManager.CheckFolderPermissionsAsync(
+                [folder], _immediately, checkPermissions, !_ignoreException);
+            if (errorMsg != null)
+            {
+                if (!_ignoreException && checkPermissions && !canDelete)
+                {
+                    canCalculate = FolderDao.CanCalculateSubitems(folderId) ? default : folderId;
+                }
+
+                Err = errorMsg;
+            }
+            else
+            {
+                canCalculate = FolderDao.CanCalculateSubitems(folderId) ? default : folderId;
+                await fileMarker.RemoveMarkAsNewForAllAsync(folder);
+
+                if (folder.ProviderEntry && (folder.Id.Equals(folder.RootId) || isRoom))
+                {
+                    if (ProviderDao != null)
+                    {
+                        List<AceWrapper> aces = null;
+
+                        if (folder.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+                        {
+                            var providerInfo = await ProviderDao.GetProviderInfoAsync(folder.ProviderId);
+                            if (providerInfo.FolderId != null)
+                            {
+                                await roomLogoManager.DeleteAsync(providerInfo.FolderId, checkPermissions);
+                            }
+
+                            aces = await fileSharing.GetSharedInfoAsync(folder);
+                        }
+
+                        if (isNeedSendActions)
+                        {
+                            webhookTrigger = isRoom
+                                ? folder.IsAgent
+                                    ? WebhookTrigger.AgentDeleted
+                                    : WebhookTrigger.RoomDeleted
+                                : WebhookTrigger.FolderDeleted;
+                            webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, folder);
+                        }
+
+                        await socketManager.DeleteFolder(folder, action: async () => await ProviderDao.RemoveProviderInfoAsync(folder.ProviderId));
+
+                        if (isRoom)
+                        {
+                            await notifyClient.SendRoomRemovedAsync(folder, aces, authContext.CurrentAccount.ID);
+                        }
+
+                        if (isNeedSendActions)
+                        {
+                            var action = isRoom
+                                ? folder.FolderType == FolderType.AiRoom
+                                    ? MessageAction.AgentDeleted
+                                    : MessageAction.RoomDeleted
+                                : MessageAction.ThirdPartyDeleted;
+
+                            await filesMessageService.SendAsync(action, folder, _headers, folder.Id.ToString(), folder.ProviderKey);
+                            await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, folder);
+
+                            if (isRoom && folder.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+                            {
+                                var (name, value) = await tenantQuotaFeatureStatHelper.GetStatAsync<CountRoomFeature, int>();
+                                _ = quotaSocketManager.ChangeQuotaUsedValueAsync(name, value);
+                            }
+                        }
+                    }
+
+                    ProcessedFolder(folderId);
+                }
+                else
+                {
+                    var immediately = _immediately || !FolderDao.UseTrashForRemoveAsync(folder);
+                    if (immediately && FolderDao.UseRecursiveOperation(folder.Id, default(T)))
+                    {
+                        var files = await FileDao.GetFilesAsync(folder.Id).ToListAsync();
+                        await DeleteFilesAsync(files, scope, checkPermissions: checkPermissions);
+
+                        var folders = await FolderDao.GetFoldersAsync(folder.Id).ToListAsync();
+                        await DeleteFoldersAsync(folders.Select(f => f.Id).ToList(), scope, checkPermissions: checkPermissions);
+
+                        if (await FolderDao.IsEmptyAsync(folder.Id))
+                        {
+                            var aces = new List<AceWrapper>();
+
+                            if (isRoom)
+                            {
+                                await roomLogoManager.DeleteAsync(folder.Id, checkPermissions);
+                                aces = await fileSharing.GetSharedInfoAsync(folder);
+                            }
+
+                            if (isNeedSendActions)
+                            {
+                                webhookTrigger = isRoom
+                                    ? folder.IsAgent
+                                        ? WebhookTrigger.AgentDeleted
+                                        : WebhookTrigger.RoomDeleted
+                                    : WebhookTrigger.FolderDeleted;
+                                webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, folder);
+                            }
+
+                            await socketManager.DeleteFolder(folder, action: async () => await FolderDao.DeleteFolderAsync(folder.Id));
+
+                            if (isRoom && folder.RootFolderType == FolderType.VirtualRooms)
+                            {
+                                await FolderDao.ChangeTreeFolderSizeAsync(folder.ParentId, -folder.Counter);
+                            }
+
+                            if (isNeedSendActions)
+                            {
+                                if (isRoom)
+                                {
+                                    await notifyClient.SendRoomRemovedAsync(folder, aces, authContext.CurrentAccount.ID);
+                                    await filesMessageService.SendAsync(
+                                        folder.FolderType == FolderType.AiRoom ? MessageAction.AgentDeleted : MessageAction.RoomDeleted,
+                                        folder,
+                                        _headers,
+                                        folder.Title);
+                                }
+                                else
+                                {
+                                    await filesMessageService.SendAsync(MessageAction.FolderDeleted, folder, _headers, folder.Title);
+                                }
+
+                                await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, folder);
+
+                                if (isRoom && folder.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+                                {
+                                    var (name, value) = await tenantQuotaFeatureStatHelper.GetStatAsync<CountRoomFeature, int>();
+                                    _ = quotaSocketManager.ChangeQuotaUsedValueAsync(name, value);
+                                }
+                            }
+
+                            ProcessedFolder(folderId);
+                        }
+                    }
+                    else
+                    {
+                        var files = await FileDao.GetFilesAsync(folder.Id, new OrderBy(SortedByType.AZ, true), FilterType.FilesOnly, false, Guid.Empty, string.Empty, null, false, withSubfolders: true).ToListAsync();
+
+                        if (folder.FolderType is FolderType.FormFillingFolderInProgress or FolderType.FormFillingFolderDone)
+                        {
+                            await FolderDao.ChangeFolderTypeAsync(folder, FolderType.DEFAULT);
+                            var tasks = files.Select(async file =>
+                            {
+                                await LinkDao.DeleteAllLinkAsync(file.Id);
+                                await FileDao.SaveProperties(file.Id, null);
+                            });
+
+                            await Task.WhenAll(tasks);
+                        }
+
+                        if (folder.ParentRoomType == FolderType.VirtualDataRoom)
+                        {
+                            var tasks = files.Where(file => file.IsForm).Select(async file =>
+                            {
+                                await FileDao.SaveProperties(file.Id, null);
+                                await FileDao.DeleteFormRolesAsync(file.Id);
+                            });
+
+                            await Task.WhenAll(tasks);
+                        }
+
+                        errorMsg = await permissionsManager.CheckFilePermissionsAsync(files, true, checkPermissions);
+                        if (!_ignoreException && errorMsg != null)
+                        {
+                            Err = errorMsg;
+                        }
+                        else
+                        {
+                            if (immediately)
+                            {
+                                var aces = new List<AceWrapper>();
+
+                                if (isRoom)
+                                {
+                                    var room = await roomLogoManager.DeleteAsync(folder.Id, checkPermissions);
+                                    await socketManager.UpdateFolderAsync(room);
+                                    aces = await fileSharing.GetSharedInfoAsync(folder);
+                                }
+
+                                if (isNeedSendActions)
+                                {
+                                    webhookTrigger = isRoom
+                                        ? folder.IsAgent
+                                            ? WebhookTrigger.AgentDeleted
+                                            : WebhookTrigger.RoomDeleted
+                                        : WebhookTrigger.FolderDeleted;
+                                    webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, folder);
+                                }
+
+                                await socketManager.DeleteFolder(folder, action: async () => await FolderDao.DeleteFolderAsync(folder.Id));
+
+                                if (isRoom && folder.RootFolderType == FolderType.VirtualRooms)
+                                {
+                                    await FolderDao.ChangeTreeFolderSizeAsync(folder.ParentId, -folder.Counter);
+                                }
+
+                                if (isNeedSendActions)
+                                {
+                                    if (isRoom)
+                                    {
+                                        await notifyClient.SendRoomRemovedAsync(folder, aces, authContext.CurrentAccount.ID);
+                                        await filesMessageService.SendAsync(
+                                            folder.FolderType == FolderType.AiRoom ? MessageAction.AgentDeleted : MessageAction.RoomDeleted,
+                                            folder,
+                                            _headers,
+                                            folder.Title);
+                                    }
+                                    else
+                                    {
+                                        await filesMessageService.SendAsync(MessageAction.FolderDeleted, folder, _headers, folder.Title);
+                                    }
+
+                                    await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, folder);
+
+                                    if (isRoom && folder.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+                                    {
+                                        var (name, value) = await tenantQuotaFeatureStatHelper.GetStatAsync<CountRoomFeature, int>();
+                                        _ = quotaSocketManager.ChangeQuotaUsedValueAsync(name, value);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                if (isNeedSendActions)
+                                {
+                                    webhookTrigger = WebhookTrigger.FolderTrashed;
+                                    webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, folder);
+                                }
+
+                                await socketManager.DeleteFolder(folder, action: async () => await FolderDao.MoveFolderAsync(folder.Id, _trashId, CancellationToken));
+
+                                if (isNeedSendActions)
+                                {
+                                    await filesMessageService.SendAsync(MessageAction.FolderMovedToTrash, folder, _headers, folder.Title);
+                                    await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, folder);
+
+                                    if (isRoom && folder.RootFolderType is FolderType.VirtualRooms or FolderType.Archive)
+                                    {
+                                        var (name, value) = await tenantQuotaFeatureStatHelper.GetStatAsync<CountRoomFeature, int>();
+                                        _ = quotaSocketManager.ChangeQuotaUsedValueAsync(name, value);
+                                    }
+                                }
+                            }
+
+                            ProcessedFolder(folderId);
+                        }
+                    }
+                }
+            }
+
+            await ProgressStep(canCalculate);
+        }
+    }
+
+    private async Task DeleteFilesAsync(IEnumerable<T> fileIds, IServiceScope scope, bool isNeedSendActions = false, bool checkPermissions = true)
+    {
+        var scopeClass = scope.ServiceProvider.GetService<FileDeleteOperationScope>();
+        var socketManager = scope.ServiceProvider.GetService<SocketManager>();
+        var webhookManager = scope.ServiceProvider.GetService<WebhookManager>();
+        var security = scope.ServiceProvider.GetService<DeletePermissionsCheck<T>>();
+
+        var (fileMarker, filesMessageService, _) = scopeClass;
+
+        var webhookTrigger = WebhookTrigger.All;
+        IEnumerable<DbWebhooksConfig> webhookConfigs = null;
+
+        foreach (var fileId in fileIds)
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+
+            // Intentional re-read: must use current file state at execution time (TOCTOU mitigation).
+            // Pre-check was done before enqueue, but permissions/locks/existence may have changed.
+            var file = await FileDao.GetFileAsync(fileId);
+            var errorMsg = await security.CheckFilePermissionsAsync([file], false, checkPermissions);
+            if (errorMsg == FilesCommonResource.ErrorMessage_FileNotFound)
+            {
+                Err = errorMsg;
+            }
+            else if (!_ignoreException && errorMsg != null)
+            {
+                Err = errorMsg;
+            }
+            else
+            {
+                await fileMarker.RemoveMarkAsNewForAllAsync(file);
+                await LinkDao.DeleteAllLinkAsync(file.Id);
+                await FileDao.SaveProperties(file.Id, null);
+                if (file.IsForm)
+                {
+                    await FileDao.DeleteFormRolesAsync(file.Id);
+                }
+                if (!_immediately && FileDao.UseTrashForRemove(file))
+                {
+                    try
+                    {
+                        if (isNeedSendActions)
+                        {
+                            webhookTrigger = WebhookTrigger.FileTrashed;
+                            webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, file);
+                        }
+
+                        await socketManager.DeleteFileAsync(file, action: async () => await FileDao.MoveFileAsync(file.Id, _trashId, file.RootFolderType == FolderType.USER));
+
+                        if (file.Id is int trashedFormFileId)
+                        {
+                            var factoryIndexerForm = scope.ServiceProvider.GetService<FactoryIndexerForm>();
+                            await factoryIndexerForm.DeleteAsync(r => r.Where(s => s.Id, trashedFormFileId));
+                        }
+
+                        if (isNeedSendActions)
+                        {
+                            await filesMessageService.SendAsync(MessageAction.FileMovedToTrash, file, _headers, file.Title);
+                            await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, file);
+                        }
+
+                        if (file.ThumbnailStatus == Thumbnail.Waiting)
+                        {
+                            file.ThumbnailStatus = Thumbnail.NotRequired;
+                            await FileDao.SetThumbnailStatusAsync(file, Thumbnail.NotRequired);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Err = ex.Message;
+                        Logger.ErrorWithException(ex);
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        var daoFactory = scope.ServiceProvider.GetService<IDaoFactory>();
+                        var tagDao = daoFactory.GetTagDao<T>();
+                        var fromRoomTags = tagDao.GetTagsAsync(fileId, FileEntryType.File, TagType.FromRoom); //why no await?
+                        var fromRoomTag = await fromRoomTags.FirstOrDefaultAsync();
+                        var hasHeaders = _headers is { Count: > 0 };
+
+                        if ((hasHeaders && isNeedSendActions) || !hasHeaders)
+                        {
+                            webhookTrigger = WebhookTrigger.FileDeleted;
+                            webhookConfigs = await webhookManager.GetWebhookConfigsAsync(webhookTrigger, file);
+                        }
+
+                        await socketManager.DeleteFileAsync(file, action: async () => await FileDao.DeleteFileAsync(file.Id, fromRoomTag == null ? file.GetFileQuotaOwner() : ASC.Core.Configuration.Constants.CoreSystem.ID));
+
+                        var folderDao = scope.ServiceProvider.GetService<IFolderDao<int>>();
+
+                        if (file.RootFolderType == FolderType.Archive)
+                        {
+                            var archiveId = await folderDao.GetFolderIDArchive(false);
+                            await folderDao.ChangeTreeFolderSizeAsync(archiveId, -1 * file.ContentLength);
+                        }
+                        else if (file.RootFolderType == FolderType.TRASH)
+                        {
+                            await folderDao.ChangeTreeFolderSizeAsync(_trashId, -1 * file.ContentLength);
+                        }
+
+                        if (hasHeaders)
+                        {
+                            if (isNeedSendActions)
+                            {
+                                await filesMessageService.SendAsync(MessageAction.FileDeleted, file, _headers, file.Title);
+                                await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, file);
+                            }
+                        }
+                        else
+                        {
+                            await filesMessageService.SendAsync(MessageAction.FileDeleted, file, MessageInitiator.AutoCleanUp, file.Title);
+                            await webhookManager.PublishAsync(webhookTrigger, webhookConfigs, file);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Err = ex.Message;
+                        Logger.ErrorWithException(ex);
+                    }
+                }
+
+                ProcessedFile(fileId);
+            }
+
+            await ProgressStep(fileId: FolderDao.CanCalculateSubitems(fileId) ? default : fileId);
+        }
+    }
+
+    private async Task DeleteFileVersionAsync(T fileId, IEnumerable<int> versions, AsyncServiceScope scope)
+    {
+        var socketManager = scope.ServiceProvider.GetService<SocketManager>();
+        var webhookManager = scope.ServiceProvider.GetService<WebhookManager>();
+        var filesMessageService = scope.ServiceProvider.GetService<FilesMessageService>();
+        var permissionManager = scope.ServiceProvider.GetService<DeletePermissionsCheck<T>>();
+
+        var file = await FileDao.GetFileAsync(fileId);
+
+        var errorMsg = await permissionManager.CheckVersionPermissionsAsync(file);
+        if ((errorMsg == FilesCommonResource.ErrorMessage_FileNotFound) || (errorMsg == FilesCommonResource.ErrorMessage_SecurityException))
+        {
+            Err = errorMsg;
+        }
+        else
+        {
+            foreach (var v in versions)
+            {
+                CancellationToken.ThrowIfCancellationRequested();
+
+                if (file.Version == v)
+                {
+                    Err = FilesCommonResource.ErrorMessage_SecurityException_FileVersion;
+                }
+                else if (!_ignoreException && errorMsg != null)
+                {
+                    Err = errorMsg;
+                }
+                else
+                {
+                    try
+                    {
+                        await FileDao.DeleteFileVersionAsync(file, v);
+                        await socketManager.UpdateFileAsync(file);
+
+                        if (_headers is { Count: > 0 })
+                        {
+                            await filesMessageService.SendAsync(MessageAction.FileVersionRemoved, file, _headers, file.Title, v.ToString());
+                            await webhookManager.PublishAsync(WebhookTrigger.FileUpdated, file);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Err = ex.Message;
+                        Logger.ErrorWithException(ex);
+                    }
+
+                    Process++;
+                    Result += $"file_{fileId}{SplitChar}";
+                }
+
+                await ProgressStep();
+            }
+        }
+    }
+}
+
+[Scope]
+public record FileDeleteOperationScope(
+    FileMarker FileMarker,
+    FilesMessageService FilesMessageService,
+    RoomLogoManager RoomLogoManager);

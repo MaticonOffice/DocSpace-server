@@ -1,0 +1,297 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Core.Common.Quota.Features;
+
+namespace ASC.Web.Api.Core;
+
+[Scope]
+public class QuotaHelper(
+    TenantManager tenantManager,
+    IServiceProvider serviceProvider,
+    CoreBaseSettings coreBaseSettings,
+    SettingsManager settingsManager,
+    UserManager userManager,
+    AuthContext authContext)
+{
+    public async IAsyncEnumerable<QuotaDto> GetQuotasAsync(bool all = false, bool wallet = false)
+    {
+        var quotaList = await tenantManager.GetTenantQuotasAsync(all, wallet);
+        var userType = await userManager.GetUserTypeAsync(authContext.CurrentAccount.ID);
+        var enabledWalletServices = coreBaseSettings.Standalone ? null : (await settingsManager.LoadAsync<TenantWalletServiceSettings>()).EnabledServices;
+        var currentQuota = await tenantManager.GetCurrentTenantQuotaAsync();
+
+        foreach (var quota in quotaList)
+        {
+            yield return await ToQuotaDto(quota, userType, false, enabledWalletServices, currentQuota);
+        }
+    }
+
+    public async Task<QuotaDto> GetCurrentQuotaAsync(bool refresh = false, bool getUsed = true)
+    {
+        var quota = await tenantManager.GetCurrentTenantQuotaAsync(refresh);
+        var userType = await userManager.GetUserTypeAsync(authContext.CurrentAccount.ID);
+        var enabledWalletServices = coreBaseSettings.Standalone ? null : (await settingsManager.LoadAsync<TenantWalletServiceSettings>()).EnabledServices;
+
+        return await ToQuotaDto(quota, userType, getUsed, enabledWalletServices, quota);
+    }
+
+    public async Task<QuotaDto> ToQuotaDtoAsync(TenantQuota quota, bool getUsed = true)
+    {
+        var userType = await userManager.GetUserTypeAsync(authContext.CurrentAccount.ID);
+        var enabledWalletServices = coreBaseSettings.Standalone ? null : (await settingsManager.LoadAsync<TenantWalletServiceSettings>()).EnabledServices;
+        var currentQuota = await tenantManager.GetCurrentTenantQuotaAsync();
+
+        return await ToQuotaDto(quota, userType, getUsed, enabledWalletServices, currentQuota);
+    }
+
+    public async Task<IEnumerable<WalletServiceDto>> GetWalletServicesAsync()
+    {
+        var quotas = await tenantManager.GetTenantQuotasAsync(all: true, wallet: true);
+
+        var userType = await userManager.GetUserTypeAsync(authContext.CurrentAccount.ID);
+        var enabledWalletServices = coreBaseSettings.Standalone ? null : (await settingsManager.LoadAsync<TenantWalletServiceSettings>()).EnabledServices;
+        var aiEnabled = !coreBaseSettings.Standalone && (await settingsManager.LoadAsync<TenantAiAccessSettings>()).Enabled;
+        var currentQuota = await tenantManager.GetCurrentTenantQuotaAsync();
+
+        var dict = new Dictionary<string, WalletServiceDto>();
+
+        foreach (var quota in quotas.OrderByDescending(q => q.Visible))
+        {
+            if (quota.AITools && !aiEnabled)
+            {
+                continue;
+            }
+
+            var quotaDto = await ToQuotaDto(quota, userType, false, enabledWalletServices, currentQuota);
+            var walletServiceDto = quotaDto.MapToWalletServiceDto();
+            walletServiceDto.ServiceName = quota.ServiceName;
+
+            if (quota.Visible)
+            {
+                dict.Add(quota.Name, walletServiceDto);
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(quota.ServiceGroup) && dict.ContainsKey(quota.ServiceGroup))
+            {
+                if (dict[quota.ServiceGroup].InnerServices == null)
+                {
+                    dict[quota.ServiceGroup].InnerServices = [walletServiceDto];
+                }
+                else
+                {
+                    dict[quota.ServiceGroup].InnerServices.Add(walletServiceDto);
+                }
+            }
+        }
+
+        return dict.Values;
+    }
+
+    private async Task<QuotaDto> ToQuotaDto(TenantQuota quota, EmployeeType employeeType, bool getUsed = false, List<TenantWalletService> enabledWalletServices = null, TenantQuota currentQuota = null)
+    {
+        var features = await GetFeatures(quota, employeeType, getUsed, enabledWalletServices, currentQuota).ToListAsync();
+
+        var result = new QuotaDto
+        {
+            Id = quota.TenantId,
+            Title = Resource.ResourceManager.GetString($"Tariffs_{quota.Name}"),
+
+            NonProfit = quota.NonProfit,
+            Free = quota.Free,
+            Trial = quota.Trial,
+
+            Price = new PriceDto
+            {
+                Value = quota.Price,
+                CurrencySymbol = quota.PriceCurrencySymbol,
+                ISOCurrencySymbol = quota.PriceISOCurrencySymbol
+            },
+
+            Features = features,
+            DueDate = quota.DueDate
+        };
+
+        if (coreBaseSettings.Standalone || (await tenantManager.GetCurrentTenantQuotaAsync()).Statistic)
+        {
+            var tenantUserQuotaSettingsTask = settingsManager.LoadAsync<TenantUserQuotaSettings>();
+            var tenantRoomQuotaSettingsTask = settingsManager.LoadAsync<TenantRoomQuotaSettings>();
+            var tenantAiAgentQuotaSettingsTask = settingsManager.LoadAsync<TenantAiAgentQuotaSettings>();
+            var tenantQuotaSettingsTask = settingsManager.LoadAsync<TenantQuotaSettings>();
+
+            await Task.WhenAll(tenantUserQuotaSettingsTask, tenantRoomQuotaSettingsTask, tenantQuotaSettingsTask, tenantAiAgentQuotaSettingsTask);
+
+            result.UsersQuota = await tenantUserQuotaSettingsTask;
+            result.RoomsQuota = await tenantRoomQuotaSettingsTask;
+            result.AiAgentsQuota = await tenantAiAgentQuotaSettingsTask;
+            result.TenantCustomQuota = await tenantQuotaSettingsTask;
+        }
+
+        return result;
+    }
+
+    private async IAsyncEnumerable<TenantQuotaFeatureDto> GetFeatures(TenantQuota quota, EmployeeType employeeType, bool getUsed, List<TenantWalletService> enabledWalletServices, TenantQuota currentQuota)
+    {
+        var assembly = GetType().Assembly;
+
+        foreach (var feature in quota.TenantQuotaFeatures.
+                    Where(r =>
+                        {
+                            if (r.Standalone)
+                            {
+                                return coreBaseSettings.Standalone;
+                            }
+
+                            if (r.EmployeeType == EmployeeType.DocSpaceAdmin && employeeType != EmployeeType.DocSpaceAdmin)
+                            {
+                                return false;
+                            }
+
+                            if (quota.Wallet && !quota.Features.Contains(r.Name))
+                            {
+                                return false;
+                            }
+
+                            return r.Visible;
+                        })
+                    .OrderBy(r => r.Order))
+        {
+            var featureName = $"{feature.Name}{(quota.Wallet ? "_wallet" : "")}";
+
+            var result = new TenantQuotaFeatureDto
+            {
+                Title = Resource.ResourceManager.GetString($"TariffsFeature_{featureName}") ?? ""
+            };
+
+            if (feature.Paid)
+            {
+                result.PriceTitle = Resource.ResourceManager.GetString($"TariffsFeature_{featureName}_price_count");
+            }
+
+            result.Id = feature.Name;
+
+            object used = null;
+            var availableFeature = true;
+            var isUsedAvailable = employeeType != EmployeeType.Guest &&
+                                  (employeeType != EmployeeType.User ||
+                                   feature.Name == MaxTotalSizeFeature.MaxTotalSizeFeatureName);
+
+            if (feature is TenantQuotaFeatureSize size)
+            {
+                result.Value = size.Value == long.MaxValue ? -1 : size.Value;
+                result.Type = "size";
+                result.Title = string.Format(result.Title, FileSizeComment.FilesSizeToString((long)result.Value));
+
+                await GetStat<long>();
+            }
+            else if (feature is CountFreeBackupFeature countFreeBackup)
+            {
+                result.Value = coreBaseSettings.Standalone ? -1 : countFreeBackup.Value;
+                result.Type = "count";
+                result.Title = string.Format(result.Title, result.Value);
+
+                await GetStat<int>();
+            }
+            else if (feature is TenantQuotaFeatureCount count)
+            {
+                result.Value = count.Value == int.MaxValue ? -1 : count.Value;
+                result.Type = "count";
+
+                await GetStat<int>();
+            }
+            else if (feature is WalletFeatureFlag walletFlag)
+            {
+                result.Type = "flag";
+                result.Value = enabledWalletServices != null
+                    && TenantWalletServiceExtensions.TryParse(walletFlag.Name, true, out var service)
+                    && enabledWalletServices.Contains(service);
+
+                const string backupFeatureName = "backup";
+                if (walletFlag.Name == backupFeatureName && currentQuota is { CountFreeBackup: > 0 })
+                {
+                    result.Title = Resource.ResourceManager.GetString("TariffsFeature_backup_wallet_additional") ?? result.Title;
+                }
+            }
+            else if (feature is TenantQuotaFeatureFlag flag)
+            {
+                result.Value = flag.Value;
+                result.Type = "flag";
+
+                availableFeature = flag.Value;
+            }
+
+            if (getUsed)
+            {
+                if (used != null)
+                {
+                    result.Used = new FeatureUsedDto
+                    {
+                        Value = isUsedAvailable ? used : null,
+                        Title = Resource.ResourceManager.GetString($"TariffsFeature_used_{featureName}")
+                    };
+                }
+            }
+            else
+            {
+                var img = assembly.GetManifestResourceStream($"{assembly.GetName().Name}.img.{featureName}.svg");
+
+                if (availableFeature && img != null)
+                {
+                    try
+                    {
+                        using var memoryStream = new MemoryStream();
+                        await img.CopyToAsync(memoryStream);
+                        result.Image = Encoding.UTF8.GetString(memoryStream.ToArray());
+                    }
+                    catch (Exception)
+                    {
+
+                    }
+                }
+            }
+
+            yield return result;
+
+            async Task GetStat<T>()
+            {
+                var statisticProvider = (ITenantQuotaFeatureStat<T>)serviceProvider.GetService(typeof(ITenantQuotaFeatureStat<,>).MakeGenericType(feature.GetType(), typeof(T)));
+
+                if (statisticProvider != null)
+                {
+                    used = await statisticProvider.GetValueAsync();
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,159 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Core.Configuration;
+
+/// <summary>
+/// The SMTP settings parameters.
+/// </summary>
+public class SmtpSettings
+{
+    public const int DefaultSmtpPort = 25;
+    public const string DefaultSenderDisplayName = "MATICONOFFICE Postman";
+    public string Host { get; private set; }
+    public int Port { get; private set; }
+    public string SenderAddress { get; private set; }
+    public string SenderDisplayName { get; private set; }
+    public string CredentialsDomain { get; private set; }
+    public string CredentialsUserName { get; private set; }
+    public string CredentialsUserPassword { get; private set; }
+    public bool EnableSSL { get; init; }
+    public bool EnableAuth { get; set; }
+    public bool IsDefaultSettings { get; internal set; }
+    public bool UseNtlm { get; set; }
+
+    public static readonly SmtpSettings Empty = new() { IsDefaultSettings = true };
+
+    private SmtpSettings() { }
+
+    public SmtpSettings(string host, string senderAddress, string senderDisplayName = DefaultSenderDisplayName)
+        : this(host, DefaultSmtpPort, senderAddress, senderDisplayName)
+    {
+
+    }
+
+    public SmtpSettings(string host, int port, string senderAddress, string senderDisplayName = DefaultSenderDisplayName)
+    {
+        if (string.IsNullOrEmpty(host))
+        {
+            throw new ArgumentException("Empty smtp host.", nameof(host));
+        }
+        if (string.IsNullOrEmpty(senderAddress))
+        {
+            throw new ArgumentException("Empty sender address.", nameof(senderAddress));
+        }
+
+        Host = host;
+        Port = port;
+        SenderAddress = senderAddress;
+        SenderDisplayName = senderDisplayName ?? throw new ArgumentNullException(nameof(senderDisplayName));
+    }
+
+    public void SetCredentials(string userName, string password)
+    {
+        SetCredentials(userName, password, string.Empty);
+    }
+
+    public void SetCredentials(string userName, string password, string domain)
+    {
+        if (string.IsNullOrEmpty(userName))
+        {
+            throw new ArgumentException("Empty user name.", nameof(userName));
+        }
+        if (string.IsNullOrEmpty(password))
+        {
+            throw new ArgumentException("Empty password.", nameof(password));
+        }
+
+        CredentialsUserName = userName;
+        CredentialsUserPassword = password;
+        CredentialsDomain = domain;
+    }
+
+    public string Serialize()
+    {
+        return ToString();
+    }
+
+    public static SmtpSettings Deserialize(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return Empty;
+        }
+
+        var props = value.Split(['#'], StringSplitOptions.None);
+        props = Array.ConvertAll(props, p => !string.IsNullOrEmpty(p) ? p : null);
+
+        var host = HttpUtility.UrlDecode(props[3]);
+        var port = !string.IsNullOrEmpty(props[4]) ? int.Parse(props[4]) : DefaultSmtpPort;
+        var senderAddress = HttpUtility.UrlDecode(props[5]);
+        var senderDisplayName = HttpUtility.UrlDecode(props[6]) ?? DefaultSenderDisplayName;
+
+        var settings = new SmtpSettings(host, port, senderAddress, senderDisplayName)
+        {
+            EnableSSL = 7 < props.Length && !string.IsNullOrEmpty(props[7]) && Convert.ToBoolean(props[7])
+        };
+
+        var credentialsUserName = HttpUtility.UrlDecode(props[1]);
+        var credentialsUserPassword = HttpUtility.UrlDecode(props[2]);
+        var credentialsDomain = HttpUtility.UrlDecode(props[0]);
+        if (!string.IsNullOrEmpty(credentialsUserName) && !string.IsNullOrEmpty(credentialsUserPassword))
+        {
+            settings.SetCredentials(credentialsUserName, credentialsUserPassword, credentialsDomain);
+            settings.EnableAuth = true;
+            settings.UseNtlm = 8 < props.Length && !string.IsNullOrEmpty(props[8]) && Convert.ToBoolean(props[8]);
+        }
+        else
+        {
+            settings.EnableAuth = false;
+            settings.UseNtlm = false;
+        }
+
+        return settings;
+    }
+
+    public override string ToString()
+    {
+        return string.Join("#",
+                           HttpUtility.UrlEncode(CredentialsDomain),
+                           HttpUtility.UrlEncode(CredentialsUserName),
+                           HttpUtility.UrlEncode(CredentialsUserPassword),
+                           HttpUtility.UrlEncode(Host),
+                           Port.ToString(),
+                           HttpUtility.UrlEncode(SenderAddress),
+                           HttpUtility.UrlEncode(SenderDisplayName),
+                           EnableSSL.ToString(),
+                           UseNtlm.ToString());
+    }
+}

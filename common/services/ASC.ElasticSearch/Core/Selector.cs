@@ -1,0 +1,558 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.ElasticSearch;
+
+[Scope]
+public class Selector<T>(IServiceProvider serviceProvider)
+    where T : class, ISearchItem
+{
+    private readonly IServiceProvider _serviceProvider = serviceProvider;
+    private readonly QueryContainerDescriptor<T> _queryContainerDescriptor = new();
+    private SortDescriptor<T> _sortContainerDescriptor = new();
+    private QueryContainer _queryContainer = new();
+    private int _limit = 1000, _offset;
+
+    public Selector<T> Where<TProperty>(Expression<Func<T, TProperty>> selector, TProperty value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.Term(w, value));
+
+        return this;
+    }
+
+    public Selector<T> Where(Expression<Func<T, Guid>> selector, Guid value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (a, w) => w.Match(r => r.Field(a).Query(value.ToString())));
+
+        return this;
+    }
+
+    public Selector<T> Gt(Expression<Func<T, object>> selector, double? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.Range(a => a.Field(w).GreaterThan(value)));
+
+        return this;
+    }
+
+    public Selector<T> Lt(Expression<Func<T, object>> selector, double? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.Range(a => a.Field(w).LessThan(value)));
+
+        return this;
+    }
+
+    public Selector<T> Gt(Expression<Func<T, object>> selector, DateTime? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.DateRange(a => a.Field(w).GreaterThan(value)));
+
+        return this;
+    }
+
+    public Selector<T> Ge(Expression<Func<T, object>> selector, DateTime? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.DateRange(a => a.Field(w).GreaterThanOrEquals(value)));
+
+        return this;
+    }
+
+    public Selector<T> Lt(Expression<Func<T, object>> selector, DateTime? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.DateRange(a => a.Field(w).LessThan(value)));
+
+        return this;
+    }
+
+    public Selector<T> Le(Expression<Func<T, object>> selector, DateTime? value)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.DateRange(a => a.Field(w).LessThanOrEquals(value)));
+
+        return this;
+    }
+
+    public Selector<T> In<TValue>(Expression<Func<T, object>> selector, TValue[] values)
+    {
+        _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.Terms(a => a.Field(w).Terms(values)));
+
+        return this;
+    }
+
+    public Selector<T> InAll<TValue>(Expression<Func<T, object>> selector, IEnumerable<TValue> values)
+    {
+        foreach (var v in values)
+        {
+            var v1 = v;
+            _queryContainer = _queryContainer && +Wrap(selector, (w, r) => r.Term(a => a.Field(w).Value(v1)));
+        }
+
+        return this;
+    }
+
+    public Selector<T> Match(Expression<Func<T, object>> selector, string value)
+    {
+        value = value.PrepareToSearch();
+
+        if (IsExactlyPhrase(value))
+        {
+            _queryContainer &= Wrap(selector, (a, w) => w.MatchPhrase(r => r.Field(a).Query(value.TrimQuotes())));
+        }
+        else if (IsExactly(value))
+        {
+            _queryContainer &= Wrap(selector, (a, w) => w.Match(r => r.Field(a).Query(value.TrimQuotes())));
+        }
+        else
+        {
+            if (IsPhrase(value))
+            {
+                var phrase = value.Split(' ');
+                foreach (var p in phrase)
+                {
+                    var p1 = p;
+                    _queryContainer &= Wrap(selector, (a, w) => w.Wildcard(r => r.Field(a).Value(p1.WrapAsterisk())));
+                }
+            }
+            else
+            {
+                _queryContainer &= Wrap(selector, (a, w) => w.Wildcard(r => r.Field(a).Value(value.WrapAsterisk())));
+            }
+
+        }
+
+        if (IsExactly(value))
+        {
+            _queryContainer |= Wrap(selector, (a, w) => w.MatchPhrase(r => r.Field(a).Query(value)));
+        }
+
+        return this;
+    }
+
+    public Selector<T> MatchAny(Expression<Func<T, object>> selector, string[] values)
+    {
+        QueryContainer orQuery = null;
+
+        foreach (var value in values)
+        {
+            var prepared = value.PrepareToSearch();
+            var wrapped = prepared.WrapAsterisk();
+            var condition = Wrap(selector, (a, w) => w.Wildcard(r => r.Field(a).Value(wrapped)));
+            orQuery = orQuery == null ? condition : orQuery | condition;
+        }
+
+        if (orQuery != null)
+        {
+            _queryContainer &= orQuery;
+        }
+
+        return this;
+    }
+
+    public Selector<T> Match(Expression<Func<T, object[]>> selector, string value)
+    {
+        Match(() => ((NewArrayExpression)selector.Body).Expressions.ToArray(), value);
+
+        return this;
+    }
+
+    public Selector<T> MatchAll(string value)
+    {
+        Match(() =>
+        {
+            var t = _serviceProvider.GetService<T>();
+            var searchSettingsHelper = _serviceProvider.GetService<SearchSettingsHelper>();
+
+            return ((NewArrayExpression)t.GetSearchContentFields(searchSettingsHelper).Body).Expressions.ToArray();
+        },
+        value);
+
+        return this;
+    }
+
+    public Selector<T> Nested(Expression<Func<T, object>> fieldSelector, Func<QueryContainerDescriptor<T>, QueryContainer> selector)
+    {
+        var path = IsNested(fieldSelector);
+        _queryContainer &= _queryContainerDescriptor.Nested(a => a.Query(selector).Path(char.ToLower(path[0]) + path[1..]));
+
+        return this;
+    }
+
+    public Selector<T> Sort(Expression<Func<T, object>> selector, bool asc)
+    {
+        _sortContainerDescriptor = _sortContainerDescriptor.Field(selector, asc ? SortOrder.Ascending : SortOrder.Descending);
+
+        return this;
+    }
+
+    public Selector<T> Limit(int newOffset = 0, int newLimit = 1000)
+    {
+        _offset = newOffset;
+        _limit = newLimit;
+
+        return this;
+    }
+
+
+    public Selector<T> Or(Expression<Func<Selector<T>, Selector<T>>> selectorLeft, Expression<Func<Selector<T>, Selector<T>>> selectorRight)
+    {
+        return new Selector<T>(_serviceProvider)
+        {
+            _queryContainer = _queryContainer &
+                (selectorLeft.Compile()(new Selector<T>(_serviceProvider))._queryContainer |
+                selectorRight.Compile()(new Selector<T>(_serviceProvider))._queryContainer)
+        };
+    }
+
+    public static Selector<T> Or(Selector<T> selectorLeft, Selector<T> selectorRight)
+    {
+        return new Selector<T>(selectorLeft._serviceProvider)
+        {
+            _queryContainer = selectorLeft._queryContainer | selectorRight._queryContainer
+        };
+    }
+
+    public Selector<T> NotExists<TProperty>(Expression<Func<T, TProperty>> selector)
+    {
+        _queryContainer = _queryContainer && !_queryContainerDescriptor.Exists(e => e.Field(new Field(selector)));
+
+        return this;
+    }
+
+    public Selector<T> Not(Expression<Func<Selector<T>, Selector<T>>> selector)
+    {
+        return new Selector<T>(_serviceProvider)
+        {
+            _queryContainer = _queryContainer & !selector.Compile()(new Selector<T>(_serviceProvider))._queryContainer
+        };
+    }
+
+    public static Selector<T> Not(Selector<T> selector)
+    {
+        return new Selector<T>(selector._serviceProvider)
+        {
+            _queryContainer = !selector._queryContainer
+        };
+    }
+
+    public static Selector<T> operator &(Selector<T> selectorLeft, Selector<T> selectorRight)
+    {
+        return new Selector<T>(selectorLeft._serviceProvider)
+        {
+            _queryContainer = selectorLeft._queryContainer & selectorRight._queryContainer
+        };
+    }
+
+    public static Selector<T> operator |(Selector<T> selectorLeft, Selector<T> selectorRight)
+    {
+        return Or(selectorLeft, selectorRight);
+    }
+
+    public static Selector<T> operator !(Selector<T> selector)
+    {
+        return Not(selector);
+    }
+
+    internal Func<SearchDescriptor<T>, ISearchRequest> GetDescriptor(BaseIndexer<T> indexer, bool onlyId = false)
+    {
+        return s =>
+        {
+            var result = s
+            .Query(_ => _queryContainer)
+            .Index(indexer.IndexName)
+            .Sort(_ => _sortContainerDescriptor)
+            .From(_offset)
+            .Size(_limit);
+
+            if (onlyId)
+            {
+                result = result.Source(r => r.Includes(a => a.Field("id")));
+            }
+
+            return result;
+        };
+    }
+
+    internal Func<CountDescriptor<T>, ICountRequest> GetCountDescriptor(BaseIndexer<T> indexer)
+    {
+        return s => s
+            .Query(_ => _queryContainer)
+            .Index(indexer.IndexName);
+    }
+
+    internal Func<DeleteByQueryDescriptor<T>, IDeleteByQueryRequest> GetDescriptorForDelete(BaseIndexer<T> indexer, bool immediately = true)
+    {
+        return s =>
+        {
+            var result = s
+                .Query(_ => _queryContainer)
+                .Index(indexer.IndexName);
+            if (immediately)
+            {
+                result.Refresh();
+            }
+
+            return result;
+        };
+    }
+
+    internal Func<UpdateByQueryDescriptor<T>, IUpdateByQueryRequest> GetDescriptorForUpdate(BaseIndexer<T> indexer, Func<ScriptDescriptor, IScript> script, bool immediately = true)
+    {
+        return s =>
+        {
+            var result = s
+                .Query(_ => _queryContainer)
+                .Index(indexer.IndexName)
+                .Script(script);
+
+            if (immediately)
+            {
+                result.Refresh();
+            }
+
+            return result;
+        };
+    }
+
+    private void Match(Func<Fields> propsFunc, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return;
+        }
+
+        value = value.PrepareToSearch();
+
+        var props = propsFunc();
+
+        if (IsExactlyPhrase(value))
+        {
+            _queryContainer = _queryContainer && MultiPhrase(props, value.TrimQuotes());
+        }
+        else if (IsExactly(value))
+        {
+            _queryContainer = _queryContainer && MultiMatch(props, value.TrimQuotes());
+        }
+        else
+        {
+            if (IsPhrase(value))
+            {
+                var phrase = value.Split(' ');
+                foreach (var p in phrase)
+                {
+                    _queryContainer = _queryContainer && MultiWildCard(props, p.WrapAsterisk());
+                }
+            }
+            else
+            {
+                if (ContainsCjk(value))
+                {
+                    _queryContainer = _queryContainer && (MultiMatch(props, value.TrimQuotes()) || MultiWildCard(props, value.WrapAsterisk()));
+                }
+                else
+                {
+                    _queryContainer = _queryContainer && MultiWildCard(props, value.WrapAsterisk());
+                }
+            }
+        }
+
+        if (IsExactly(value))
+        {
+            _queryContainer = _queryContainer || MultiPhrase(props, value);
+        }
+    }
+
+    private QueryContainer Wrap(Field fieldSelector, Func<Field, QueryContainerDescriptor<T>, QueryContainer> selector)
+    {
+        var path = IsNested(fieldSelector);
+
+        if (string.IsNullOrEmpty(path) &&
+            !string.IsNullOrEmpty(fieldSelector.Name) &&
+            fieldSelector.Name.IndexOf('.') > -1)
+        {
+            var splitted = fieldSelector.Name.Split(':')[1];
+            path = splitted.Split('.')[0];
+            fieldSelector = new Field(splitted);
+        }
+
+        if (!string.IsNullOrEmpty(path))
+        {
+            return _queryContainerDescriptor.Nested(a => a.Query(b => selector(fieldSelector, b)).Path(path));
+        }
+
+        return selector(fieldSelector, _queryContainerDescriptor);
+    }
+
+    private string IsNested(Field selector)
+    {
+        if (selector.Expression is not LambdaExpression lambdaExpression)
+        {
+            return null;
+        }
+
+        if (lambdaExpression.Body is MemberExpression memberExpression && memberExpression.Member.GetCustomAttributes(false).OfType<NestedAttribute>().Any())
+        {
+            return memberExpression.Member.Name;
+        }
+
+        if (lambdaExpression.Body is MethodCallExpression { Arguments.Count: > 1 } methodCallExpression)
+        {
+            return methodCallExpression.Arguments[0] is not MemberExpression pathMember
+                ? null
+                : pathMember.Member.Name.ToLowerCamelCase();
+        }
+
+        return null;
+    }
+
+    private bool IsPhrase(string searchText)
+    {
+        return searchText.Contains(' ') || searchText.Contains("\r\n") || searchText.Contains('\n');
+    }
+
+    private bool IsExactlyPhrase(string searchText)
+    {
+        return IsPhrase(searchText) && IsExactly(searchText);
+    }
+
+    private bool IsExactly(string searchText)
+    {
+        return searchText.StartsWith('\"') && searchText.EndsWith('\"');
+    }
+
+    private QueryContainer MultiMatch(Fields fields, string value)
+    {
+        var qcWildCard = new QueryContainer();
+
+        foreach (var field in fields)
+        {
+            qcWildCard = qcWildCard || Wrap(field, (a, w) => w.Match(r => r.Field(a).Query(value.ToLower())));
+        }
+
+        return qcWildCard;
+    }
+
+    private QueryContainer MultiWildCard(Fields fields, string value)
+    {
+        var qcWildCard = new QueryContainer();
+
+        // CJK text is not word-segmented by the whitespace-based analyzers, so a whole phrase ends up
+        // as a single (or very large) token. Substring matching there only works with a leading
+        // wildcard, so we must NOT strip it for CJK queries — otherwise content search breaks.
+        var keepLeadingWildcard = ContainsCjk(value);
+
+        foreach (var field in fields)
+        {
+            // For the document content field a leading-wildcard ("*term*") forces a full term-dictionary
+            // scan, which is extremely slow on large content indexes. Drop the leading asterisk so the
+            // query becomes a prefix match ("term*") that can use the inverted index.
+            // Short fields (title/comment/changes) keep the substring behaviour.
+            var fieldValue = !keepLeadingWildcard && IsDocumentContentField(field) ? value.TrimStart('*') : value;
+
+            qcWildCard = qcWildCard || Wrap(field, (a, w) => w.Wildcard(r => r.Field(a).Value(fieldValue)));
+        }
+
+        return qcWildCard;
+    }
+
+    private static bool ContainsCjk(string value)
+    {
+        return value.Any(c => (uint)c >= 0x4E00 && (uint)c <= 0x2FA1F);
+    }
+
+    private static bool IsDocumentContentField(Field field)
+    {
+        if (!string.IsNullOrEmpty(field.Name))
+        {
+            return field.Name.EndsWith("content", StringComparison.OrdinalIgnoreCase);
+        }
+
+        var expression = field.Expression;
+
+        // The field can be passed either as a lambda (x => x.Document.Attachment.Content)
+        // or, when it comes from a "new object[] { ... }" array, as the raw element expression
+        // wrapped in a Convert (boxing to object). Unwrap both forms down to the member access.
+        if (expression is LambdaExpression lambda)
+        {
+            expression = lambda.Body;
+        }
+
+        if (expression is UnaryExpression unary)
+        {
+            expression = unary.Operand;
+        }
+
+        return expression is MemberExpression { Member.Name: "Content" };
+    }
+
+    private QueryContainer MultiPhrase(Fields fields, string value)
+    {
+        var qcWildCard = new QueryContainer();
+
+        foreach (var field in fields)
+        {
+            qcWildCard = qcWildCard || Wrap(field, (a, w) => w.MatchPhrase(r => r.Field(a).Query(value.ToLower())));
+        }
+
+        return qcWildCard;
+    }
+}
+
+internal static class StringExtension
+{
+    extension(string value)
+    {
+        public string WrapAsterisk()
+        {
+            var result = value;
+
+            if (!value.Contains('*') && !value.Contains('?'))
+            {
+                result = "*" + result + "*";
+            }
+
+            return result;
+        }
+
+        public string ReplaceBackslash()
+        {
+            return value.Replace("\\", "\\\\");
+        }
+
+        public string TrimQuotes()
+        {
+            return value.Trim('\"');
+        }
+
+        public string PrepareToSearch()
+        {
+            return value.ReplaceBackslash().ToLowerInvariant().Replace('ё', 'е').Replace('Ё', 'Е');
+        }
+    }
+}

@@ -1,0 +1,176 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+const request = require("../requestManager.js");
+const check = require("./authService.js");
+const portalManager = require("../portalManager.js");
+const logger = require("../log.js");
+const config = require("../../config");
+
+module.exports = (socket, next) => {
+  const req = socket.client.request;
+  const session = socket.handshake.session;
+  const cookie = req?.cookies?.authorization || req?.cookies?.asc_auth_key;
+  const token = req?.headers?.authorization;
+  const share = socket.handshake.query?.share;
+
+  if (!cookie && !token && !share) {
+    const err = new Error(
+      "Authentication error (not token or cookie or share key)"
+    );
+    logger.error(err);
+    socket.disconnect("unauthorized");
+    next(err);
+    return;
+  }
+
+  if (token) {
+    if (!check(token)) {
+      const err = new Error("Authentication error (token check)");
+      logger.error(err);
+      next(err);
+    } else {
+      session.system = true;
+      session.save();
+      next();
+    }
+    return;
+  }
+
+  let headers = {};
+  var basePath = portalManager(req)?.replace(/\/$/g, "");
+  const basePathFromConfig = config.get("API_HOST")?.replace(/\/$/g, "");
+  if (basePathFromConfig) {
+    headers.Origin = basePath;
+    basePath = basePathFromConfig;
+  }
+
+  const validateExternalLink = () => {
+    return request({
+      method: "get",
+      url: `/files/share/${share}`,
+      headers,
+      basePath
+    })
+  }
+
+  if (cookie) {
+    headers.Authorization = cookie;
+
+    const getUser = () => {
+      return request({
+        method: "get",
+        url: "/people/@self?fields=id,userName,displayName,isAdmin,isOwner",
+        headers,
+        basePath,
+      });
+    };
+
+    const getPortal = () => {
+      return request({
+        method: "get",
+        url: "/portal?fields=tenantId,tenantDomain",
+        headers,
+        basePath,
+      });
+    };
+
+    const validateLink = () => {
+      if (!share) {
+        return Promise.resolve({ status: 1 });
+      }
+
+      return validateExternalLink();
+    }
+
+    return Promise.all([getUser(), getPortal(), validateLink()])
+      .then(([user, portal, { status, linkId } = { }]) => {
+        logger.info(`WS: save account info in sessionId='sess:${session.id}'`, { user, portal });
+        session.user = user;
+        session.portal = portal;
+
+        if (status === 0){
+          session.linkId = linkId;
+        }
+
+        session.save(function (err){
+          if(err) {
+            logger.error(err);
+            next(err);
+          }else{
+            next();
+          }
+        });
+      })
+      .catch((err) => {
+        logger.error(`Error of getting account info: ${err?.message || err}`, { stack: err?.stack, basePath });
+        socket.disconnect("Unauthorized");
+        next(err);
+      });
+  }
+
+  if (share) {
+    if (req?.cookies) {
+      const pairs = Object.entries(req.cookies).map(
+        ([key, value]) => `${key}=${value}`
+      );
+
+      if (pairs.length > 0) {
+        let cookie = pairs.join(";");
+        cookie += ";";
+        headers.Cookie = cookie;
+      }
+    }
+
+    return validateExternalLink()
+      .then(({ status, tenantId, linkId } = { }) => {
+        if (status !== 0) {
+          const err = new Error("Invalid share key");
+          logger.error("WS: share key validation failure:", err);
+          return next(err);
+        }
+
+        logger.info(`WS: share key validation successful: key='${share}' sessionId='sess:${session.id}'`);
+        session.anonymous = true;
+        session.portal = { tenantId };
+        session.user = { id: linkId }
+        session.save();
+        next();
+      })
+      .catch((err) => {
+        logger.error(`Error of share key validation: ${err?.message || err}`, { stack: err?.stack, basePath });
+        socket.disconnect("Unauthorized");
+        next(err);
+      });
+  }
+};

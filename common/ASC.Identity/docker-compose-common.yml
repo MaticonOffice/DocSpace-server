@@ -1,0 +1,61 @@
+﻿services:
+  maticonoffice-redis:
+    image: redis:7.0-alpine
+    container_name: maticonoffice-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - maticonoffice
+
+  maticonoffice-rabbitmq:
+    image: rabbitmq:3.11-management-alpine
+    container_name: maticonoffice-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - maticonoffice
+
+  maticonoffice-mysql-server:
+    image: mysql:8.0
+    container_name: maticonoffice-mysql-server
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: my-secret-pw
+      MYSQL_DATABASE: docspace
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - maticonoffice
+
+  migration-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: infrastructure/infrastructure-migration-runner
+    image: migration-runner:latest
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      JDBC_URL: maticonoffice-mysql-server:3306
+      JDBC_DATABASE: docspace
+      JDBC_USER_NAME: root
+      JDBC_PASSWORD: my-secret-pw
+      REDIS_HOST: maticonoffice-redis
+      RABBIT_HOST: maticonoffice-rabbitmq
+    depends_on:
+      maticonoffice-mysql-server:
+        condition: service_healthy
+    networks:
+      - maticonoffice
+
+networks:
+  maticonoffice:
+    driver: bridge

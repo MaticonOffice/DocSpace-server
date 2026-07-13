@@ -1,0 +1,750 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASCShare = ASC.Files.Core.Security.FileShare;
+
+namespace ASC.Migration.Core.Migrators.Provider.Google;
+
+[Transient(typeof(Migrator))]
+public class GoogleWorkspaceMigrator : Migrator
+{
+
+    private CancellationToken _cancellationToken;
+    private string[] _takeouts;
+    private readonly Regex _emailRegex = new(@"(\S*@\S*\.\S*)");
+    private readonly Regex _phoneRegex = new(@"(\+?\d+)");
+
+    private readonly Regex _workspacesRegex = new(@"Workspaces(\(\d+\))?.json");
+    private readonly Regex _pinnedRegex = new(@".*-at-.*-pinned\..*");
+    private const string CommentsFile = "-comments.html";
+    private const string InfoFile = "-info.json";
+    private readonly Regex _commentsVersionFile = new(@"-comments(\([\d]+\))\.html");
+    private readonly Regex _infoVersionFile = new(@"-info(\([\d]+\))\.json");
+    private readonly Regex _versionRegex = new(@"(\([\d]+\))");
+
+    private readonly Dictionary<string, string> _folderNameMappings = new();
+
+    public GoogleWorkspaceMigrator(SecurityContext securityContext,
+        UserManager userManager,
+        UserPhotoManager userPhotoManager,
+        TenantQuotaFeatureStatHelper tenantQuotaFeatureStatHelper,
+        QuotaSocketManager quotaSocketManager,
+        FileStorageService fileStorageService,
+        GlobalFolderHelper globalFolderHelper,
+        IServiceProvider serviceProvider,
+        IDaoFactory daoFactory,
+        MigrationLogger migrationLogger,
+        AuthContext authContext,
+        DisplayUserSettingsHelper displayUserSettingsHelper,
+        UserManagerWrapper userManagerWrapper,
+        UserSocketManager socketManager) : base(securityContext, userManager, userPhotoManager, tenantQuotaFeatureStatHelper, quotaSocketManager, fileStorageService, globalFolderHelper, serviceProvider, daoFactory, migrationLogger, authContext, displayUserSettingsHelper, userManagerWrapper, socketManager)
+    {
+        MigrationInfo = new MigrationInfo { Name = "GoogleWorkspace" };
+    }
+
+    public override async Task InitAsync(string path, OperationType operation, CancellationToken cancellationToken)
+    {
+        MigrationLogger.Init();
+        _cancellationToken = cancellationToken;
+
+        MigrationInfo.Operation = operation;
+
+        var files = Directory.GetFiles(path);
+        TmpFolder = path;
+        if (files.Length == 0 || !files.Any(f => f.EndsWith(".zip")))
+        {
+            MigrationInfo.FailedArchives = files.ToList();
+            throw new Exception("Archives must be .zip");
+        }
+
+        _takeouts = files.Where(item => item.EndsWith(".zip")).Order().ToArray();
+        MigrationInfo.Files = _takeouts.Select(Path.GetFileName).ToList();
+        await ReportProgressAsync(1, "start");
+    }
+
+    public override async Task<MigrationApiInfo> ParseAsync(bool reportProgress = true)
+    {
+        if (reportProgress)
+        {
+            await ReportProgressAsync(5, MigrationResource.StartOfDataProcessing);
+        }
+
+        var progressStep = 90 / _takeouts.Length;
+        var i = 1;
+        MigrationUser lastUser = null;
+        foreach (var takeout in _takeouts)
+        {
+            if (_cancellationToken.IsCancellationRequested && reportProgress)
+            {
+                return null;
+            }
+
+            if (reportProgress)
+            {
+                await ReportProgressAsync(_lastProgressUpdate + progressStep, MigrationResource.DataProcessing + $" {takeout} ({i++}/{_takeouts.Length})");
+            }
+
+            var tmpFolder = Path.Combine(TmpFolder, Path.GetFileNameWithoutExtension(takeout));
+            var key = Path.GetFileName(takeout);
+            try
+            {
+                await using (var archive = await ZipFile.OpenReadAsync(takeout, _cancellationToken))
+                {
+                    foreach (var entry in archive.Entries)
+                    {
+                        if (string.IsNullOrEmpty(entry.Name))
+                        {
+                            Directory.CreateDirectory(Path.Combine(tmpFolder, entry.FullName));
+                        }
+                        else
+                        {
+                            var dir = Path.GetDirectoryName(Path.Combine(tmpFolder, entry.FullName));
+                            if (!Directory.Exists(dir))
+                            {
+                                Directory.CreateDirectory(dir);
+                            }
+                            await entry.ExtractToFileAsync(Path.Combine(tmpFolder, entry.FullName), _cancellationToken);
+                        }
+                        if (_cancellationToken.IsCancellationRequested && reportProgress)
+                        {
+                            return null;
+                        }
+                    }
+                }
+                var rootFolder = Path.Combine(tmpFolder, "Takeout");
+
+                if (!Directory.Exists(rootFolder))
+                {
+                    throw new Exception("Takeout zip does not contain root 'Takeout' folder.");
+                }
+                var directories = Directory.GetDirectories(rootFolder);
+                var groupsPath = GetLocalizedFolderPath(rootFolder, "Groups");
+                if (directories.Length == 1 && !string.IsNullOrEmpty(groupsPath))
+                {
+                    ParseGroup(groupsPath);
+                }
+                else
+                {
+                    MigrationUser user;
+                    try
+                    {
+                        user = ParseUser(rootFolder);
+                    }
+                    catch (ParseRootHtmlException)
+                    {
+                        if (lastUser == null)
+                        {
+                            throw;
+                        }
+                        user = lastUser;
+                        ParseStorage(rootFolder, user);
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(user.Info.Email))
+                    {
+                        MigrationInfo.WithoutEmailUsers[key] = user;
+                    }
+                    else
+                    {
+                        var ascUser = await UserManager.GetUserByEmailAsync(user.Info.Email);
+                        if (ascUser.Status == EmployeeStatus.Terminated)
+                        {
+                            continue;
+                        }
+                        if (!ascUser.Equals(Constants.LostUser))
+                        {
+                            if (!MigrationInfo.ExistUsers.TryAdd(user.Info.Email, user))
+                            {
+                                MergeStorages(MigrationInfo.ExistUsers[user.Info.Email], user);
+                            }
+                        }
+                        else
+                        {
+                            if (!MigrationInfo.Users.TryAdd(user.Info.Email, user))
+                            {
+                                MergeStorages(MigrationInfo.Users[user.Info.Email], user);
+                            }
+                        }
+                    }
+
+                    lastUser = user;
+                }
+            }
+            catch (Exception ex)
+            {
+                MigrationInfo.FailedArchives.Add(key);
+                Log(MigrationResource.CanNotParseArchives, ex);
+                if (MigrationInfo.FailedArchives.Count == _takeouts.Length)
+                {
+                    throw new Exception(MigrationResource.CanNotParseArchives);
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(tmpFolder) && reportProgress)
+                {
+                    Directory.Delete(tmpFolder, true);
+                }
+            }
+        }
+        if (reportProgress)
+        {
+            await ReportProgressAsync(100, MigrationResource.DataProcessingCompleted);
+        }
+
+        return MigrationInfo.ToApiInfo();
+    }
+
+    private void MergeStorages(MigrationUser user1, MigrationUser user2)
+    {
+        user1.Storage.BytesTotal += user2.Storage.BytesTotal;
+        user1.Storage.Files.AddRange(user2.Storage.Files);
+        user1.Storage.Folders.AddRange(user2.Storage.Folders);
+        user1.Storage.Securities.AddRange(user2.Storage.Securities);
+    }
+    private void ParseGroup(string groupsFolder)
+    {
+        var group = new MigrationGroup { Info = new GroupInfo(), UserKeys = [] };
+        var groupInfo = Path.Combine(groupsFolder, "info.csv");
+        using (var sr = new StreamReader(groupInfo))
+        {
+            var line = sr.ReadLine();
+            line = sr.ReadLine();
+            if (line != null)
+            {
+                var name = line.Split(',')[9];
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    group.Info.Name = name;
+                }
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(group.Info.Name))
+        {
+            var groupMembers = Path.Combine(groupsFolder, "members.csv");
+            using var sr = new StreamReader(groupMembers);
+            var line = sr.ReadLine();
+            while ((line = sr.ReadLine()) != null)
+            {
+                group.UserKeys.Add(line.Split(',')[1]);
+            }
+        }
+        MigrationInfo.Groups.Add(group.Info.Name, group);
+    }
+
+    private MigrationUser ParseUser(string tmpFolder)
+    {
+        var user = new MigrationUser(DisplayUserSettingsHelper) { Info = new UserInfo() };
+
+        ParseRootHtml(tmpFolder, user);
+        ParseProfile(tmpFolder, user);
+        ParseAccount(tmpFolder, user);
+
+        user.Info.UserName = user.Info.Email.Split('@').First();
+        if (string.IsNullOrEmpty(user.Info.FirstName))
+        {
+            user.Info.FirstName = user.Info.Email.Split('@').First();
+        }
+
+        ParseStorage(tmpFolder, user);
+
+        return user;
+    }
+
+    private string GetLocalizedFolderPath(string parentFolder, string folderName)
+    {
+        if (_folderNameMappings.TryGetValue(folderName.ToLowerInvariant(), out var localizedFolderName))
+        {
+            var localizedPath = Path.Combine(parentFolder, localizedFolderName);
+            if (Directory.Exists(localizedPath))
+            {
+                return localizedPath;
+            }
+        }
+
+        var defaultPath = Path.Combine(parentFolder, folderName);
+        return Directory.Exists(defaultPath) ? defaultPath : null;
+    }
+
+    private void ParseStorage(string tmpFolder, MigrationUser user)
+    {
+        user.Storage = new MigrationStorage();
+
+        var drivePath = GetLocalizedFolderPath(tmpFolder, "Drive");
+        if (string.IsNullOrEmpty(drivePath))
+        {
+            return;
+        }
+
+        var entries = Directory.GetFileSystemEntries(drivePath, "*", SearchOption.AllDirectories);
+
+        user.Storage.RootKey = "0";
+        var filteredEntries = new List<string>();
+
+        foreach (var entry in entries)
+        {
+            if (ShouldIgnoreFile(entry, entries))
+            {
+                continue;
+            }
+
+            filteredEntries.Add(entry);
+        }
+        var i = 1;
+        var foldersdictionary = new Dictionary<string, MigrationFolder>();
+        foreach (var entry in filteredEntries)
+        {
+            var attr = File.GetAttributes(entry);
+            if (attr.HasFlag(FileAttributes.Directory))
+            {
+                i = ParseFolders(entry.Substring(drivePath.Length + 1), foldersdictionary, i);
+            }
+            else
+            {
+                var fi = new FileInfo(entry);
+                user.Storage.BytesTotal += fi.Length;
+
+                var substring = entry.Substring(drivePath.Length + 1);
+                var split = substring.Split(Path.DirectorySeparatorChar);
+                var path = Path.GetDirectoryName(substring);
+                if (split.Length != 1)
+                {
+                    i = ParseFolders(path, foldersdictionary, i);
+                }
+                var file = new MigrationFile
+                {
+                    Id = i++,
+                    Folder = split.Length == 1 ? 0 : foldersdictionary[path].Id,
+                    Title = split.Last(),
+                    Path = entry
+                };
+                user.Storage.Files.Add(file);
+            }
+        }
+        user.Storage.Folders.AddRange(foldersdictionary.Select(f => f.Value));
+
+        foreach (var file in user.Storage.Files)
+        {
+            ParseShare(user.Storage.Securities, file.Path, file.Id, 2);
+        }
+
+        foreach (var folder in foldersdictionary)
+        {
+            ParseShare(user.Storage.Securities, Path.Combine(drivePath, folder.Key), folder.Value.Id, 1);
+        }
+    }
+
+    private void ParseShare(List<MigrationSecurity> list, string path, int id, int entryType)
+    {
+        if (!TryReadInfoFile(path, out var info))
+        {
+            return;
+        }
+
+        foreach (var shareInfo in info.Permissions)
+        {
+            if (shareInfo.Type is "user" or "group")
+            {
+                var shareType = GetPortalShare(shareInfo);
+                var subject = shareInfo.Type is "group" ? shareInfo.Name : shareInfo.EmailAddress;
+                if (shareType == null || string.IsNullOrEmpty(subject))
+                {
+                    continue;
+                }
+
+                var security = new MigrationSecurity
+                {
+                    Subject = subject,
+                    EntryId = id,
+                    EntryType = entryType,
+                    Security = (int)shareType.Value
+                };
+                list.Add(security);
+            }
+        }
+    }
+
+    private ASCShare? GetPortalShare(GwsDriveFilePermission fileInfo)
+    {
+        switch (fileInfo.Role)
+        {
+            case "writer":
+                return ASCShare.Editing;
+            case "reader":
+                if (fileInfo.AdditionalRoles == null)
+                {
+                    return ASCShare.Read;
+                }
+
+                return fileInfo.AdditionalRoles.Contains("commenter") ? ASCShare.Comment : ASCShare.Read;
+
+            default:
+                return null;
+        }
+    }
+
+    private int ParseFolders(string entry, Dictionary<string, MigrationFolder> foldersdictionary, int i)
+    {
+        var split = entry.Split(Path.DirectorySeparatorChar);
+        var j = 1;
+        foreach (var f in split)
+        {
+            var key = string.Join(Path.DirectorySeparatorChar, split[..(j)]);
+            if (!foldersdictionary.ContainsKey(key))
+            {
+                var parentId = 0;
+                if (j > 1)
+                {
+                    var parentKey = string.Join(Path.DirectorySeparatorChar, split[..(j - 1)]);
+                    parentId = foldersdictionary[parentKey].Id;
+                }
+                var folder = new MigrationFolder
+                {
+                    Id = i++,
+                    ParentId = parentId,
+                    Title = f,
+                    Level = j
+                };
+                foldersdictionary.Add(key, folder);
+            }
+            j++;
+        }
+        return i;
+    }
+
+    private bool ShouldIgnoreFile(string entry, string[] entries)
+    {
+        if (_workspacesRegex.IsMatch(Path.GetFileName(entry)))
+        {
+            return true; // ignore workspaces.json
+        }
+
+        if (_pinnedRegex.IsMatch(Path.GetFileName(entry)))
+        {
+            return true; // ignore pinned files
+        }
+
+        if (entry.EndsWith(CommentsFile) || entry.EndsWith(InfoFile)) // check if this really a meta for existing file
+        {
+            // folder - folder
+            // folder-info.json - valid meta
+
+            // file.docx - file
+            // file.docx-info.json - valid meta
+            // file-info.json - valid meta
+
+            var baseName = entry.Substring(0, entry.Length - (entry.EndsWith(CommentsFile) ? CommentsFile.Length : InfoFile.Length));
+            if (entries.Contains(baseName))
+            {
+                return true;
+            }
+
+            if (entries
+                .Where(e => e.StartsWith(baseName + "."))
+                .Select(e => e.Substring(0, e.Length - Path.GetExtension(e).Length))
+                .Contains(baseName))
+            {
+                return true;
+            }
+        }
+
+        // file(1).docx - file
+        // file.docx-info(1).json - valid meta
+        // file-info(1).json - valid meta
+        var commentsVersionMatch = _commentsVersionFile.Match(entry);
+        if (commentsVersionMatch.Success)
+        {
+            var baseName = entry.Substring(0, entry.Length - commentsVersionMatch.Groups[0].Value.Length);
+            baseName = baseName.Insert(baseName.LastIndexOf('.'), commentsVersionMatch.Groups[1].Value);
+
+            if (entries.Contains(baseName))
+            {
+                return true;
+            }
+
+            if (entries
+                .Where(e => e.StartsWith(baseName + "."))
+                .Select(e => e.Substring(0, e.Length - Path.GetExtension(e).Length))
+                .Contains(baseName))
+            {
+                return true;
+            }
+        }
+
+        var infoVersionMatch = _infoVersionFile.Match(entry);
+        if (infoVersionMatch.Success)
+        {
+            var baseName = entry.Substring(0, entry.Length - infoVersionMatch.Groups[0].Length);
+            baseName = baseName.Insert(baseName.LastIndexOf('.'), infoVersionMatch.Groups[1].Value);
+
+            if (entries.Contains(baseName))
+            {
+                return true;
+            }
+
+            if (entries
+                .Where(e => e.StartsWith(baseName + "."))
+                .Select(e => e.Substring(0, e.Length - Path.GetExtension(e).Length))
+                .Contains(baseName))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public class ParseRootHtmlException : Exception
+    {
+        public ParseRootHtmlException(string message) : base(message)
+        {
+        }
+
+        public ParseRootHtmlException(string message, Exception inner) : base(message, inner)
+        {
+        }
+    }
+
+    private void ParseRootHtml(string tmpFolder, MigrationUser user)
+    {
+        var htmlFiles = Directory.GetFiles(tmpFolder, "*.html");
+        if (htmlFiles.Length != 1)
+        {
+            throw new ParseRootHtmlException("Incorrect Takeout format.");
+        }
+
+        var htmlPath = htmlFiles[0];
+
+        var doc = new HtmlDocument();
+        doc.Load(htmlPath);
+
+        var emailNode = doc.DocumentNode.SelectNodes("//body//h1[@class='header_title']")[0];
+        var matches = _emailRegex.Match(emailNode.InnerText);
+        if (!matches.Success)
+        {
+            throw new ParseRootHtmlException("Couldn't parse root html.");
+        }
+
+        user.Info.Email = matches.Groups[1].Value;
+
+        var folderNameNodes = doc.DocumentNode.SelectNodes("//h1[@class='data-folder-name'][@data-english-name][@data-folder-name]");
+        if (folderNameNodes == null)
+        {
+            return;
+        }
+
+        foreach (var node in folderNameNodes)
+        {
+            var englishName = node.GetAttributeValue("data-english-name", string.Empty);
+            var localizedName = node.GetAttributeValue("data-folder-name", string.Empty);
+
+            if (!string.IsNullOrEmpty(englishName) && !string.IsNullOrEmpty(localizedName))
+            {
+                _folderNameMappings[englishName.ToLowerInvariant()] = localizedName;
+            }
+        }
+    }
+
+    private void ParseProfile(string tmpFolder, MigrationUser user)
+    {
+        var profileFolderPath = GetLocalizedFolderPath(tmpFolder, "Profile");
+        if (string.IsNullOrEmpty(profileFolderPath))
+        {
+            return;
+        }
+
+        var profilePath = Path.Combine(profileFolderPath, "Profile.json");
+        if (!File.Exists(profilePath))
+        {
+            return;
+        }
+
+        var googleProfile = JsonSerializer.Deserialize<GwsProfile>(File.ReadAllText(profilePath));
+
+        if (googleProfile.Birthday != null)
+        {
+            user.Info.BirthDate = googleProfile.Birthday.Value.DateTime;
+        }
+
+        if (googleProfile.Gender != null)
+        {
+            user.Info.Sex = googleProfile.Gender.Type switch
+            {
+                "male" => true,
+                "female" => false,
+                _ => null
+            };
+        }
+
+        user.Info.FirstName = googleProfile.Name.GivenName;
+        user.Info.LastName = googleProfile.Name.FamilyName;
+
+        if (googleProfile.Emails != null)
+        {
+            foreach (var email in googleProfile.Emails.Distinct())
+            {
+                AddEmailToUser(user, email.Value);
+            }
+        }
+
+        user.PathToPhoto = Path.Combine(profileFolderPath, "ProfilePhoto.jpg");
+        user.HasPhoto = File.Exists(user.PathToPhoto);
+    }
+
+    private void ParseAccount(string tmpFolder, MigrationUser user)
+    {
+        var accountPath = GetLocalizedFolderPath(tmpFolder, "Google Account");
+        if (string.IsNullOrEmpty(accountPath))
+        {
+            return;
+        }
+
+        var htmlFiles = Directory.GetFiles(accountPath, "*.SubscriberInfo.html");
+        if (htmlFiles.Length != 1)
+        {
+            return;
+        }
+
+        var htmlPath = htmlFiles[0];
+
+        var doc = new HtmlDocument();
+        doc.Load(htmlPath);
+
+        var alternateEmails = _emailRegex.Matches(doc.DocumentNode.SelectNodes("//div[@class='section'][1]/ul/li[2]")[0].InnerText);
+        foreach (Match match in alternateEmails)
+        {
+            AddEmailToUser(user, match.Value);
+        }
+
+        var contactEmail = _emailRegex.Match(doc.DocumentNode.SelectNodes("//div[@class='section'][3]/ul/li[1]")[0].InnerText);
+        if (contactEmail.Success)
+        {
+            AddEmailToUser(user, contactEmail.Groups[1].Value);
+        }
+
+        var recoveryEmail = _emailRegex.Match(doc.DocumentNode.SelectNodes("//div[@class='section'][3]/ul/li[2]")[0].InnerText);
+        if (recoveryEmail.Success)
+        {
+            AddEmailToUser(user, recoveryEmail.Groups[1].Value);
+        }
+
+        var recoverySms = _phoneRegex.Match(doc.DocumentNode.SelectNodes("//div[@class='section'][3]/ul/li[3]")[0].InnerText);
+        if (recoverySms.Success)
+        {
+            AddPhoneToUser(user, recoverySms.Groups[1].Value);
+        }
+    }
+
+    private void AddEmailToUser(MigrationUser user, string email)
+    {
+        if (user.Info.Email != email && !user.Info.Contacts.Contains(email))
+        {
+            user.Info.ContactsList.Add(email.EndsWith("@gmail.com") ? "gmail" : "mail"); // SocialContactsManager.ContactType_gmail in ASC.WebStudio
+            user.Info.ContactsList.Add(email);
+        }
+    }
+
+    private void AddPhoneToUser(MigrationUser user, string phone)
+    {
+        if (user.Info.MobilePhone != phone && !user.Info.Contacts.Contains(phone))
+        {
+            user.Info.ContactsList.Add("mobphone"); // SocialContactsManager.ContactType_mobphone in ASC.WebStudio
+            user.Info.ContactsList.Add(phone);
+        }
+    }
+
+    private bool TryReadInfoFile(string entry, out GwsDriveFileInfo info)
+    {
+        info = null;
+        var infoFilePath = FindInfoFile(entry);
+
+        if (infoFilePath == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            JsonSerializerOptions options = new()
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            info = JsonSerializer.Deserialize<GwsDriveFileInfo>(File.ReadAllText(infoFilePath), options);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log(string.Format(MigrationResource.CanNotReadInfoFile, entry), ex);
+        }
+
+        return false;
+    }
+
+    private string FindInfoFile(string entry)
+    {
+        var infoFilePath = entry + InfoFile;
+        if (File.Exists(infoFilePath))
+        {
+            return infoFilePath; // file.docx-info.json
+        }
+
+        var ext = Path.GetExtension(entry);
+        infoFilePath = entry.Substring(0, entry.Length - ext.Length) + InfoFile;
+        if (File.Exists(infoFilePath))
+        {
+            return infoFilePath; // file-info.json
+        }
+
+        var versionMatch = _versionRegex.Match(entry);
+        if (!versionMatch.Success)
+        {
+            return null;
+        }
+
+        var version = versionMatch.Groups[1].Value;
+        infoFilePath = entry.Replace(version, "") + InfoFile.Replace(".", version + ".");
+        if (File.Exists(infoFilePath))
+        {
+            return infoFilePath; // file.docx-info(1).json
+        }
+
+        infoFilePath = entry.Substring(0, entry.Length - ext.Length).Replace(version, "") + InfoFile.Replace(".", version + ".");
+        if (File.Exists(infoFilePath))
+        {
+            return infoFilePath; // file-info(1).json
+        }
+
+        return null;
+    }
+}

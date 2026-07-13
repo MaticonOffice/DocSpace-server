@@ -1,0 +1,318 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.Controllers.Settings;
+
+[ApiExplorerSettings(IgnoreApi = true)]
+[DefaultRoute("ldap")]
+public class LdapController(
+    WebItemManager webItemManager,
+    IFusionCache fusionCache,
+    SettingsManager settingsManager,
+    TenantManager tenantManager,
+    LdapNotifyService ldapNotifyHelper,
+    LdapSaveSyncOperation ldapSaveSyncOperation,
+    AuthContext authContext,
+    PermissionContext permissionContext,
+    CoreBaseSettings coreBaseSettings)
+    : BaseSettingsController(fusionCache, webItemManager)
+{
+    /// <remarks>
+    /// Returns the current portal LDAP settings.
+    /// </remarks>
+    /// <summary>
+    /// Get the LDAP settings
+    /// </summary>
+    /// <path>api/2.0/settings/ldap</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP settings", typeof(LdapSettingsDto))]
+    [HttpGet("")]
+    public async Task<LdapSettingsDto> GetLdapSettings()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var settings = await settingsManager.LoadAsync<LdapSettings>();
+
+        settings = settings.Clone() as LdapSettings; // clone LdapSettings object for clear password (potencial AscCache.Memory issue)
+
+        if (settings == null)
+        {
+            settings = new LdapSettings().GetDefault();
+            return settings.MapToSettingsDto();
+        }
+
+        settings.Password = null;
+        settings.PasswordBytes = null;
+
+        if (settings.IsDefault)
+        {
+            return settings.MapToSettingsDto();
+        }
+
+        var defaultSettings = settings.GetDefault();
+
+        if (settings.Equals(defaultSettings))
+        {
+            settings.IsDefault = true;
+        }
+
+        return settings.MapToSettingsDto();
+    }
+
+    /// <remarks>
+    /// Returns the LDAP asynchronous cron expression for the current portal if it exists.
+    /// </remarks>
+    /// <summary>
+    /// Get the LDAP cron expression
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/cron</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP cron settings", typeof(LdapCronSettingsDto))]
+    [HttpGet("cron")]
+    public async Task<LdapCronSettingsDto> GetLdapCronSettings()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var settings = await settingsManager.LoadAsync<LdapCronSettings>() ?? new LdapCronSettings().GetDefault();
+
+        if (string.IsNullOrEmpty(settings.Cron))
+        {
+            return null;
+        }
+
+        return settings.MapToDto();
+    }
+
+    /// <remarks>
+    /// Sets the LDAP asynchronous cron expression to the current portal.
+    /// </remarks>
+    /// <summary>
+    /// Set the LDAP cron expression
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/cron</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [HttpPost("cron")]
+    public async Task SetLdapCronSettings(LdapCronRequestDto inDto)
+    {
+        await CheckLdapPermissionsAsync();
+
+        var cron = inDto?.Cron;
+
+        if (!string.IsNullOrEmpty(cron))
+        {
+            new CronExpression(cron); // validate
+
+            if (!(await settingsManager.LoadAsync<LdapSettings>()).EnableLdapAuthentication)
+            {
+                throw new Exception(Resource.LdapSettingsErrorCantSaveLdapSettings);
+            }
+        }
+
+        var settings = await settingsManager.LoadAsync<LdapCronSettings>() ?? new LdapCronSettings();
+
+        settings.Cron = cron;
+        await settingsManager.SaveAsync(settings);
+
+        var t = tenantManager.GetCurrentTenant();
+        if (!string.IsNullOrEmpty(cron))
+        {
+            ldapNotifyHelper.UnregisterAutoSync(t);
+            ldapNotifyHelper.RegisterAutoSync(t, cron);
+        }
+        else
+        {
+            ldapNotifyHelper.UnregisterAutoSync(t);
+        }
+    }
+
+    /// <remarks>
+    /// Synchronizes the portal data with the new information from the LDAP server.
+    /// </remarks>
+    /// <summary>
+    /// Synchronize with LDAP server
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/sync</path>
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP operation status", typeof(LdapStatusDto))]
+    [HttpGet("sync")]
+    public async Task<LdapStatusDto> SyncLdap()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var ldapSettings = await settingsManager.LoadAsync<LdapSettings>();
+
+        var userId = authContext.CurrentAccount.ID.ToString();
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var result = await ldapSaveSyncOperation.SyncLdapAsync(ldapSettings, tenant, userId);
+
+        return result.MapToDto();
+    }
+
+    /// <remarks>
+    /// Starts the process of collecting preliminary changes on the portal during the synchronization process according to the selected LDAP settings.
+    /// </remarks>
+    /// <summary>
+    /// Test the LDAP synchronization
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/sync/test</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP operation status", typeof(LdapStatusDto))]
+    [HttpGet("sync/test")]
+    public async Task<LdapStatusDto> TestLdapSync()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var ldapSettings = await settingsManager.LoadAsync<LdapSettings>();
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var result = await ldapSaveSyncOperation.TestLdapSyncAsync(ldapSettings, tenant);
+
+        return result.MapToDto();
+    }
+
+    /// <remarks>
+    /// Saves the LDAP settings specified in the request and starts importing/synchronizing users and groups by LDAP.
+    /// </remarks>
+    /// <summary>
+    /// Save the LDAP settings
+    /// </summary>
+    /// <path>api/2.0/settings/ldap</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP operation status", typeof(LdapStatusDto))]
+    [HttpPost("")]
+    public async Task<LdapStatusDto> SaveLdapSettings(LdapRequestsDto inDto)
+    {
+        var ldapSettings = inDto.MapToSettings();
+
+        await CheckLdapPermissionsAsync();
+
+        if (!ldapSettings.EnableLdapAuthentication)
+        {
+            await SetLdapCronSettings(null);
+        }
+
+        var userId = authContext.CurrentAccount.ID.ToString();
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var result = await ldapSaveSyncOperation.SaveLdapSettingsAsync(ldapSettings, tenant, userId);
+
+        return result.MapToDto();
+    }
+
+    /// <remarks>
+    /// Starts the process of saving LDAP settings and collecting preliminary changes on the portal according to them.
+    /// </remarks>
+    /// <summary>
+    /// Test the LDAP saving process
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/save/test</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP operation status", typeof(LdapStatusDto))]
+    [HttpPost("save/test")]
+    public async Task<LdapStatusDto> TestLdapSave(LdapSettings inDto)
+    {
+        await CheckLdapPermissionsAsync();
+
+        var userId = authContext.CurrentAccount.ID.ToString();
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var result = await ldapSaveSyncOperation.TestLdapSaveAsync(inDto, tenant, userId);
+
+        return result.MapToDto();
+    }
+
+    /// <remarks>
+    /// Returns the LDAP synchronization process status.
+    /// </remarks>
+    /// <summary>
+    /// Get the LDAP synchronization status
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/status</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP operation status", typeof(LdapStatusDto))]
+    [HttpGet("status")]
+    public async Task<LdapStatusDto> GetLdapOperationStatus()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var result = await ldapSaveSyncOperation.ToLdapOperationStatus(tenant.Id);
+
+        return result.MapToDto();
+    }
+
+    /// <remarks>
+    /// Returns the LDAP default settings.
+    /// </remarks>
+    /// <summary>
+    /// Get the LDAP default settings
+    /// </summary>
+    /// <path>api/2.0/settings/ldap/default</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Settings / LDAP")]
+    [SwaggerResponse(200, "LDAP default settings: enable LDAP authentication or not, start TLS or not, enable SSL or not, send welcome email or not, server name, user name, port number, user filter, login attribute, LDAP settings mapping, access rights, user is a group member or not, group name, user attribute, group filter, group attribute, group name attribute, authentication is enabled or not, login, password, accept certificate or not", typeof(LdapSettingsDto))]
+    [HttpGet("default")]
+    public async Task<LdapSettingsDto> GetDefaultLdapSettings()
+    {
+        await CheckLdapPermissionsAsync();
+
+        var settings = new LdapSettings().GetDefault();
+
+        return settings.MapToSettingsDto();
+    }
+
+    private async Task CheckLdapPermissionsAsync()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        if (!coreBaseSettings.Standalone
+            && (!SetupInfo.IsVisibleSettings(ManagementType.LdapSettings.ToStringFast())
+                || !(await tenantManager.GetCurrentTenantQuotaAsync()).Ldap))
+        {
+            throw new BillingException(Resource.ErrorNotAllowedOption);
+        }
+    }
+}

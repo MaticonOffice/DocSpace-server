@@ -1,0 +1,216 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.Controllers.Settings;
+
+[DefaultRoute("webplugins")]
+public class WebPluginsController(
+    IFusionCache fusionCache,
+    WebItemManager webItemManager,
+    PermissionContext permissionContext,
+    WebPluginManager webPluginManager,
+    TenantManager tenantManager,
+    MessageService messageService,
+    CspSettingsHelper cspSettingsHelper,
+    WebPluginMapper mapper)
+    : BaseSettingsController(fusionCache, webItemManager)
+{
+    /// <remarks>
+    /// Adds a web plugin from a file to the current portal.
+    /// </remarks>
+    /// <summary>
+    /// Add a web plugin
+    /// </summary>
+    /// <path>api/2.0/settings/webplugins</path>
+    /// <exception cref="CustomHttpException"></exception>
+    [Tags("Settings / Webplugins")]
+    [SwaggerResponse(200, "Web plugin", typeof(WebPluginDto))]
+    [SwaggerResponse(400, "bad request")]
+    [SwaggerResponse(403, "Plugins disabled")]
+    [HttpPost("")]
+    public async Task<WebPluginDto> AddWebPluginFromFile(WebPluginFromFileRequestDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        if (HttpContext.Request.Form.Files == null || HttpContext.Request.Form.Files.Count == 0)
+        {
+            throw new ArgumentException(Resource.ErrorWebPluginNoInputFile);
+        }
+
+        if (HttpContext.Request.Form.Files.Count > 1)
+        {
+            throw new ArgumentException(Resource.ErrorWebPluginToManyInputFiles);
+        }
+
+        var file = HttpContext.Request.Form.Files[0] ?? throw new ArgumentException(Resource.ErrorWebPluginNoInputFile);
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var webPlugin = await webPluginManager.AddWebPluginFromFileAsync(tenant.Id, file, inDto.System);
+
+        messageService.Send(MessageAction.WebpluginUploaded, MessageTarget.Create($"{webPlugin.PluginName}{webPlugin.Version}"), webPlugin.Name);
+
+        await ChangeCspSettings(webPlugin, webPlugin.Enabled);
+
+        var outDto = await mapper.ToDtoManual(webPlugin);
+
+        return outDto;
+    }
+
+    /// <remarks>
+    /// Returns the portal web plugins.
+    /// </remarks>
+    /// <summary>
+    /// Get web plugins
+    /// </summary>
+    /// <path>api/2.0/settings/webplugins</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Webplugins")]
+    [SwaggerResponse(200, "Web plugin", typeof(IEnumerable<WebPluginDto>))]
+    [SwaggerResponse(403, "Plugins disabled")]
+    [HttpGet("")]
+    public async Task<IEnumerable<WebPluginDto>> GetWebPlugins(GetWebPluginsRequestDto inDto)
+    {
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var webPlugins = await webPluginManager.GetWebPluginsAsync(tenant.Id);
+
+        List<WebPluginDto> outDto = [];
+        foreach (var webPlugin in webPlugins)
+        {
+            outDto.Add(await mapper.ToDtoManual(webPlugin));
+        }
+
+        if (inDto.Enabled.HasValue)
+        {
+            outDto = outDto.Where(i => i.Enabled == inDto.Enabled).ToList();
+        }
+
+        return outDto;
+    }
+
+    /// <remarks>
+    /// Returns a web plugin by the name specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Get a web plugin by name
+    /// </summary>
+    /// <path>api/2.0/settings/webplugins/{name}</path>
+    [Tags("Settings / Webplugins")]
+    [SwaggerResponse(200, "Web plugin", typeof(WebPluginDto))]
+    [SwaggerResponse(403, "Plugins disabled")]
+    [HttpGet("{name}")]
+    public async Task<WebPluginDto> GetWebPlugin(WebPluginNameRequestDto inDto)
+    {
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var webPlugin = await webPluginManager.GetWebPluginByNameAsync(tenant.Id, inDto.Name);
+
+        var outDto = await mapper.ToDtoManual(webPlugin);
+
+        return outDto;
+    }
+
+    /// <remarks>
+    /// Updates a web plugin with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Update a web plugin
+    /// </summary>
+    /// <path>api/2.0/settings/webplugins/{name}</path>
+    [Tags("Settings / Webplugins")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(403, "Plugins disabled")]
+    [HttpPut("{name}")]
+    public async Task UpdateWebPlugin(WebPluginRequestsDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var webPlugin = await webPluginManager.UpdateWebPluginAsync(tenant.Id, inDto.Name, inDto.WebPlugin.Enabled, inDto.WebPlugin.Settings);
+
+        messageService.Send(MessageAction.WebpluginUpdated, MessageTarget.Create($"{webPlugin.PluginName}{webPlugin.Version}"), webPlugin.Name);
+
+        await ChangeCspSettings(webPlugin, inDto.WebPlugin.Enabled);
+    }
+
+    /// <remarks>
+    /// Deletes a web plugin by the name specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Delete a web plugin
+    /// </summary>
+    /// <path>api/2.0/settings/webplugins/{name}</path>
+    [Tags("Settings / Webplugins")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(403, "Plugins disabled")]
+    [HttpDelete("{name}")]
+    public async Task DeleteWebPlugin(WebPluginNameRequestDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var tenant = tenantManager.GetCurrentTenant();
+
+        var webPlugin = await webPluginManager.DeleteWebPluginAsync(tenant.Id, inDto.Name);
+
+        messageService.Send(MessageAction.WebpluginDeleted, MessageTarget.Create($"{webPlugin.PluginName}{webPlugin.Version}"), webPlugin.Name);
+
+        await ChangeCspSettings(webPlugin, false);
+    }
+
+    private async Task ChangeCspSettings(WebPlugin plugin, bool enabled)
+    {
+        if (string.IsNullOrEmpty(plugin.CspDomains))
+        {
+            return;
+        }
+
+        var settings = await cspSettingsHelper.LoadAsync();
+
+        var domains = plugin.CspDomains.Split(',');
+
+        var currentDomains = settings.Domains?.ToList() ?? [];
+
+        if (enabled)
+        {
+            currentDomains.AddRange(domains);
+        }
+        else
+        {
+            _ = currentDomains.RemoveAll(x => domains.Contains(x));
+        }
+
+        _ = await cspSettingsHelper.SaveAsync(currentDomains.Distinct());
+    }
+}

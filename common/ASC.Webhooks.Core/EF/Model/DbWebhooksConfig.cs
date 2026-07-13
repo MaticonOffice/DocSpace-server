@@ -1,0 +1,275 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Webhooks.Core.EF.Model;
+
+public class DbWebhooksConfig : BaseEntity
+{
+    public int Id { get; set; }
+    public int TenantId { get; set; }
+    [MaxLength(50)]
+    public string Name { get; set; }
+    public string Uri { get; set; }
+    [MaxLength(50)]
+    public string SecretKey { get; set; }
+    public bool Enabled { get; set; }
+    public bool SSL { get; set; }
+    public WebhookTrigger Triggers { get; set; }
+    [MaxLength(255)]
+    public string TargetId { get; set; }
+
+    public Guid? CreatedBy { get; set; }
+    public DateTime? CreatedOn { get; set; }
+    public Guid? ModifiedBy { get; set; }
+    public DateTime? ModifiedOn { get; set; }
+    public DateTime? LastFailureOn { get; set; }
+    public string LastFailureContent { get; set; }
+    public DateTime? LastSuccessOn { get; set; }
+
+    public DbTenant Tenant { get; set; }
+    public override object[] GetKeys()
+    {
+        return [Id];
+    }
+}
+
+public static class WebhooksConfigExtension
+{
+    public static ModelBuilderWrapper AddWebhooksConfig(this ModelBuilderWrapper modelBuilder)
+    {
+        modelBuilder.Entity<DbWebhooksConfig>().Navigation(e => e.Tenant).AutoInclude(false);
+
+        modelBuilder
+            .Add(MySqlAddWebhooksConfig, Provider.MySql)
+            .Add(PgSqlAddWebhooksConfig, Provider.PostgreSql);
+
+        return modelBuilder;
+    }
+    extension(ModelBuilder modelBuilder)
+    {
+        public void MySqlAddWebhooksConfig()
+        {
+            modelBuilder.Entity<DbWebhooksConfig>(entity =>
+            {
+                entity.HasKey(e => new { e.Id })
+                    .HasName("PRIMARY");
+
+                entity.HasIndex(e => e.TenantId)
+                    .HasDatabaseName("tenant_id");
+
+                entity.ToTable("webhooks_config")
+                    .HasCharSet("utf8");
+
+                entity.Property(e => e.Id)
+                    .HasColumnType("int")
+                    .HasColumnName("id");
+
+                entity.Property(e => e.TenantId)
+                    .HasColumnName("tenant_id");
+
+                entity.Property(e => e.Name)
+                    .HasColumnName("name")
+                    .IsRequired();
+
+                entity.Property(e => e.SecretKey)
+                    .HasColumnName("secret_key")
+                    .HasDefaultValueSql("''");
+
+                entity.Property(e => e.Uri)
+                    .HasColumnName("uri")
+                    .HasDefaultValueSql("''")
+                    .HasColumnType("text")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.Enabled)
+                    .HasColumnName("enabled")
+                    .HasDefaultValueSql("'1'")
+                    .HasColumnType("tinyint(1)");
+
+                entity.Property(e => e.SSL)
+                    .HasColumnName("ssl")
+                    .HasDefaultValueSql("'1'")
+                    .HasColumnType("tinyint(1)");
+
+                entity.Property(e => e.Triggers)
+                    .HasColumnName("triggers")
+                    .HasColumnType("bigint")
+                    .IsRequired();
+
+                entity.Property(e => e.TargetId)
+                    .IsRequired(false)
+                    .HasColumnName("target_id")
+                    .HasColumnType("varchar(255)")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.CreatedBy)
+                    .IsRequired(false)
+                    .HasColumnName("created_by")
+                    .HasColumnType("varchar(36)")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.CreatedOn)
+                    .IsRequired(false)
+                    .HasColumnName("created_on")
+                    .HasColumnType("datetime");
+
+                entity.Property(e => e.ModifiedBy)
+                    .IsRequired(false)
+                    .HasColumnName("modified_by")
+                    .HasColumnType("varchar(36)")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.ModifiedOn)
+                    .IsRequired(false)
+                    .HasColumnName("modified_on")
+                    .HasColumnType("datetime");
+
+                entity.Property(e => e.LastFailureOn)
+                    .IsRequired(false)
+                    .HasColumnName("last_failure_on")
+                    .HasColumnType("datetime");
+
+                entity.Property(e => e.LastFailureContent)
+                    .IsRequired(false)
+                    .HasColumnName("last_failure_content")
+                    .HasColumnType("varchar(200)")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.LastSuccessOn)
+                    .IsRequired(false)
+                    .HasColumnName("last_success_on")
+                    .HasColumnType("datetime");
+            });
+        }
+
+        public void PgSqlAddWebhooksConfig()
+        {
+            modelBuilder.Entity<DbWebhooksConfig>(entity =>
+            {
+                entity.HasKey(e => e.Id)
+                    .HasName("webhooks_config_pkey");
+
+                entity.HasIndex(e => e.TenantId)
+                    .HasDatabaseName("idx_webhooks_config_tenant_id");
+
+                entity.ToTable("webhooks_config");
+
+                entity.Property(e => e.Id)
+                    .HasColumnName("id")
+                    .HasColumnType("integer");
+
+                entity.Property(e => e.TenantId)
+                    .HasColumnName("tenant_id")
+                    .HasColumnType("integer");
+
+                entity.Property(e => e.Name)
+                    .HasColumnName("name")
+                    .IsRequired()
+                    .HasMaxLength(50)
+                    .HasColumnType("character varying");
+
+                entity.Property(e => e.SecretKey)
+                    .HasColumnName("secret_key")
+                    .HasDefaultValueSql("''")
+                    .HasColumnType("text");
+
+                entity.Property(e => e.Uri)
+                    .HasColumnName("uri")
+                    .IsRequired(false)
+                    .HasColumnType("text");
+
+                entity.Property(e => e.Enabled)
+                    .HasColumnName("enabled")
+                    .HasDefaultValueSql("true")
+                    .HasColumnType("boolean");
+
+                entity.Property(e => e.SSL)
+                    .HasColumnName("ssl")
+                    .HasDefaultValueSql("true")
+                    .HasColumnType("boolean");
+
+                entity.Property(e => e.Triggers)
+                    .HasColumnName("triggers")
+                    .HasColumnType("bigint")
+                    .IsRequired();
+
+                entity.Property(e => e.TargetId)
+                    .IsRequired(false)
+                    .HasColumnName("target_id")
+                    .HasMaxLength(255)
+                    .HasColumnType("character varying");
+
+                entity.Property(e => e.CreatedBy)
+                    .IsRequired(false)
+                    .HasColumnName("created_by")
+                    .HasColumnType("uuid");
+
+                entity.Property(e => e.CreatedOn)
+                    .IsRequired(false)
+                    .HasColumnName("created_on");
+
+                entity.Property(e => e.ModifiedBy)
+                    .IsRequired(false)
+                    .HasColumnName("modified_by")
+                    .HasColumnType("uuid");
+
+                entity.Property(e => e.ModifiedOn)
+                    .IsRequired(false)
+                    .HasColumnName("modified_on");
+
+                entity.Property(e => e.LastFailureOn)
+                    .IsRequired(false)
+                    .HasColumnName("last_failure_on");
+
+                entity.Property(e => e.LastFailureContent)
+                    .IsRequired(false)
+                    .HasColumnName("last_failure_content");
+
+                entity.Property(e => e.LastSuccessOn)
+                    .IsRequired(false)
+                    .HasColumnName("last_success_on");
+            });
+        }
+    }
+}
+
+public class WebhooksConfigWithStatus
+{
+    public DbWebhooksConfig WebhooksConfig { get; init; }
+    public int? Status { get; set; }
+}

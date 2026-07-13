@@ -1,0 +1,366 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using System.Text.Json;
+
+using Microsoft.Extensions.Primitives;
+
+namespace ASC.Data.Backup.Services;
+
+[Transient]
+public class BackupProgressItem : BaseBackupProgressItem, IDisposable
+{
+    private Dictionary<string, string> _storageParams;
+    private string _tempFolder;
+
+    private bool _isScheduled;
+    private Guid _userId;
+    private BackupStorageType _storageType;
+    private string _storageBasePath;
+    private int _limit;
+    private string _serverBaseUri;
+    private int _billingSessionId;
+    private DateTime _billingSessionExpire;
+    private IDictionary<string, StringValues> _httpHeaders;
+    private readonly SemaphoreSlim _billingSessionSemaphore = new(1, 1);
+    private readonly ILogger<BackupProgressItem> _logger;
+    private readonly CoreBaseSettings _coreBaseSettings;
+    private readonly NotifyHelper _notifyHelper;
+
+    public BackupProgressItem()
+    {
+
+    }
+
+    public BackupProgressItem(ILogger<BackupProgressItem> logger,
+        IServiceScopeFactory serviceProvider,
+        CoreBaseSettings coreBaseSettings,
+        NotifyHelper notifyHelper) : base(serviceProvider)
+    {
+        _logger = logger;
+        _coreBaseSettings = coreBaseSettings;
+        _notifyHelper = notifyHelper;
+    }
+
+    public void Init(BackupSchedule schedule, bool isScheduled, string tempFolder, int limit, int billingSessionId, DateTime billingSessionExpire)
+    {
+        Init();
+        BackupProgressItemType = BackupProgressItemType.Backup;
+        _userId = Guid.Empty;
+        TenantId = schedule.TenantId;
+        _storageType = schedule.StorageType;
+        _storageBasePath = schedule.StorageBasePath;
+        _storageParams = JsonSerializer.Deserialize<Dictionary<string, string>>(schedule.StorageParams);
+        _isScheduled = isScheduled;
+        _tempFolder = tempFolder;
+        _limit = limit;
+        Dump = schedule.Dump;
+        _billingSessionId = billingSessionId;
+        _billingSessionExpire = billingSessionExpire;
+    }
+
+    public void Init(StartBackupRequest request, bool isScheduled, string tempFolder, int limit, int billingSessionId, DateTime billingSessionExpire)
+    {
+        Init();
+        BackupProgressItemType = BackupProgressItemType.Backup;
+        _userId = request.UserId;
+        TenantId = request.TenantId;
+        _storageType = request.StorageType;
+        _storageBasePath = request.StorageBasePath;
+        _storageParams = request.StorageParams.ToDictionary(r => r.Key, r => r.Value);
+        _isScheduled = isScheduled;
+        _tempFolder = tempFolder;
+        _limit = limit;
+        Dump = request.Dump;
+        _serverBaseUri = request.ServerBaseUri;
+        _billingSessionId = billingSessionId;
+        _billingSessionExpire = billingSessionExpire;
+        _httpHeaders = request.Headers?.ToDictionary(x => x.Key, x => new StringValues(x.Value));
+    }
+
+    protected override async Task DoJob()
+    {
+        await using var scope = _serviceScopeProvider.CreateAsyncScope();
+
+        var tenantManager = scope.ServiceProvider.GetService<TenantManager>();
+        var backupStorageFactory = scope.ServiceProvider.GetService<BackupStorageFactory>();
+        var backupService = scope.ServiceProvider.GetService<BackupService>();
+        var backupRepository = scope.ServiceProvider.GetService<BackupRepository>();
+        using var backupPortalTask = scope.ServiceProvider.GetService<BackupPortalTask>();
+        var tempStream = scope.ServiceProvider.GetService<TempStream>();
+        var socketManager = scope.ServiceProvider.GetService<SocketManager>();
+        var messageService = scope.ServiceProvider.GetService<MessageService>();
+        var securityContext = scope.ServiceProvider.GetService<SecurityContext>();
+        await tenantManager.SetCurrentTenantAsync(TenantId);
+        await socketManager.BackupProgressAsync(0, Dump);
+
+        if (!_userId.Equals(Guid.Empty))
+        {
+            await securityContext.AuthenticateMeWithoutCookieAsync(_userId);
+        }
+        else
+        {
+            var tenant = await tenantManager.GetTenantAsync(TenantId);
+            await securityContext.AuthenticateMeWithoutCookieAsync(tenant.OwnerId);
+        }
+
+        var dateTime = _coreBaseSettings.Standalone ? DateTime.Now : DateTime.UtcNow;
+        var tempFile = "";
+        var storagePath = "";
+
+        try
+        {
+            SaveAuditEvent(messageService, _isScheduled ? MessageAction.ScheduledBackupStarted : MessageAction.BackupStarted);
+
+            var backupStorage = await backupStorageFactory.GetBackupStorageAsync(_storageType, TenantId, _storageParams);
+
+            var getter = backupStorage as IGetterWriteOperator;
+            var name = Dump ? "workspace" : (await tenantManager.GetTenantAsync(TenantId)).Alias;
+            var backupName = string.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss}.{2}", name, dateTime, await getter.GetBackupExtensionAsync(_storageBasePath));
+
+            tempFile = CrossPlatform.PathCombine(_tempFolder, backupName);
+            storagePath = tempFile;
+
+            var writer = await DataOperatorFactory.GetWriteOperatorAsync(tempStream, _storageBasePath, backupName, _tempFolder, _userId, getter, CancellationToken);
+
+            backupPortalTask.Init(TenantId, tempFile, _limit, writer, Dump);
+
+            backupPortalTask.ProgressChanged = async args =>
+            {
+                if (CancellationToken.IsCancellationRequested) 
+                {
+                    return;
+                }
+                Percentage = 0.9 * args.Progress;
+                await socketManager.BackupProgressAsync((int)Percentage, Dump);
+                await PublishChanges();
+
+                if (_billingSessionId > 0 && _billingSessionExpire.Subtract(DateTime.UtcNow) < TimeSpan.FromHours(1))
+                {
+                    await _billingSessionSemaphore.WaitAsync();
+                    try
+                    {
+                        if (_billingSessionExpire.Subtract(DateTime.UtcNow) < TimeSpan.FromHours(1))
+                        {
+                            var extensedSession = await backupService.ExtendCustomerSessionForBackupAsync(TenantId, _billingSessionId);
+                            _billingSessionExpire = extensedSession.Expire;
+                        }
+                    }
+                    finally
+                    {
+                        _billingSessionSemaphore.Release();
+                    }
+                }
+            };
+
+            await backupPortalTask.RunJob();
+
+            CancellationToken.ThrowIfCancellationRequested();
+
+            string hash;
+            if (writer.NeedUpload)
+            {
+                storagePath = await backupStorage.UploadAsync(_storageBasePath, tempFile, _userId, CancellationToken);
+                hash = BackupWorker.GetBackupHashSHA(tempFile);
+            }
+            else
+            {
+                storagePath = writer.StoragePath;
+                hash = writer.Hash;
+            }
+
+            CancellationToken.ThrowIfCancellationRequested();
+
+            Link = await backupStorage.GetPublicLinkAsync(storagePath);
+
+            var backupTenant = TenantId;
+            if (Dump)
+            {
+                backupTenant = -1;
+                _storageParams.TryAdd("tenantId", TenantId.ToString());
+            }
+            await backupRepository.SaveBackupRecordAsync(
+                new BackupRecord
+                {
+                    Id = Guid.Parse(Id),
+                    TenantId = backupTenant,
+                    IsScheduled = _isScheduled,
+                    Name = Path.GetFileName(tempFile),
+                    StorageType = _storageType,
+                    StorageBasePath = _storageBasePath,
+                    StoragePath = storagePath,
+                    CreatedOn = DateTime.UtcNow,
+                    ExpiresOn = _storageType == BackupStorageType.DataStore ? DateTime.UtcNow.AddDays(1) : DateTime.MinValue,
+                    StorageParams = JsonSerializer.Serialize(_storageParams),
+                    Hash = hash,
+                    Removed = false,
+                    Paid = _billingSessionId > 0
+                });
+
+            Percentage = 100;
+
+            if (_userId != Guid.Empty && !_isScheduled)
+            {
+                _notifyHelper.SetServerBaseUri(_serverBaseUri);
+
+                await _notifyHelper.SendAboutBackupCompletedAsync(TenantId, _userId);
+            }
+
+            var missingFilesInfo = backupPortalTask.GetMissingFilesInfo();
+            if (!string.IsNullOrEmpty(missingFilesInfo))
+            {
+                Warning = string.Format(BackupResource.BackupMissingFilesWarning, missingFilesInfo);
+            }
+
+            IsCompleted = true;
+            await socketManager.BackupProgressAsync((int)Percentage, Dump);
+            await PublishChanges();
+
+            SaveAuditEvent(messageService, _isScheduled ? MessageAction.ScheduledBackupCompleted : MessageAction.BackupCompleted);
+
+            var customerParticipantName = _isScheduled ? null : _userId.ToString();
+            var details = _isScheduled ? BackupResource.AutoBackup : BackupResource.ResourceManager.GetString($"BackupStorageType{_storageType}");
+            var metadata = new Dictionary<string, string> { { BillingClient.MetadataDetails, details } };
+
+            var completeCustomerSessionResult = await backupService.CompleteCustomerSessionForBackupAsync(TenantId, _billingSessionId, customerParticipantName, metadata);
+            if (completeCustomerSessionResult)
+            {
+                SaveAuditEvent(messageService, MessageAction.CustomerOperationPerformed);
+            }
+
+            if (backupStorage is DocumentsBackupStorage documentsBackupStorage)
+            {
+                var fileMarker = scope.ServiceProvider.GetService<FileMarker>();
+                if (int.TryParse(storagePath, out var fileId))
+                {
+                    await SentDocumentsStorageNotification(documentsBackupStorage, socketManager, fileMarker, fileId);
+                }
+                else
+                {
+                    await SentDocumentsStorageNotification(documentsBackupStorage, socketManager, fileMarker, storagePath);
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            IsCompleted = true;
+
+            if (CancellationToken.IsCancellationRequested)
+            {
+                Status = DistributedTaskStatus.Canceled;
+                Warning = ASC.AuditTrail.AuditReportResource.BackupCancelled;
+                _logger.InfoBackupCancelled();
+            }
+            else
+            {
+                Exception = error;
+                _logger.ErrorRunJob(Id, TenantId, tempFile, _storageBasePath, error);
+                SaveAuditEvent(messageService, _isScheduled ? MessageAction.ScheduledBackupFailed : MessageAction.BackupFailed);
+            }
+
+            try
+            {
+                await backupService.CloseCustomerSessionForBackupAsync(TenantId, _billingSessionId);
+            }
+            catch (Exception closeCustomerSessionError)
+            {
+                _logger.ErrorWithException(closeCustomerSessionError);
+            }
+
+            try
+            {
+                if (!CancellationToken.IsCancellationRequested)
+                {
+                    _notifyHelper.SetServerBaseUri(_serverBaseUri);
+                    await _notifyHelper.SendAboutBackupFailedAsync(TenantId, _userId, error.Message);
+                }
+            }
+            catch (Exception notifyError)
+            {
+                _logger.ErrorWithException(notifyError);
+            }
+        }
+        finally
+        {
+            try
+            {
+                await socketManager.EndBackupAsync(ToBackupProgress(), Dump);
+                await PublishChanges();
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorPublish(error);
+            }
+            try
+            {
+                if (!(storagePath == tempFile && _storageType == BackupStorageType.Local))
+                {
+                    File.Delete(tempFile);
+                }
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorCantDeleteFile(error);
+            }
+        }
+    }
+
+    private void SaveAuditEvent(MessageService messageService, MessageAction messageAction)
+    {
+        if (_isScheduled)
+        {
+            messageService.Send(MessageInitiator.BackupService, messageAction);
+        }
+        else
+        {
+            messageService.SendHeadersMessage(messageAction, target: null, _httpHeaders, null);
+        }
+    }
+
+    private async Task SentDocumentsStorageNotification<T>(DocumentsBackupStorage documentsBackupStorage, SocketManager socketManager, FileMarker fileMarker, T fileId)
+    {
+        var file = await documentsBackupStorage.GetAsync(fileId);
+        await socketManager.CreateFileAsync(file);
+        await fileMarker.MarkAsNewAsync(file);
+    }
+
+    public override object Clone()
+    {
+        return MemberwiseClone();
+    }
+
+    public void Dispose()
+    {
+        _billingSessionSemaphore.Dispose();
+    }
+}

@@ -1,0 +1,310 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core;
+
+/// <summary>
+/// The data of the submitted forms.
+/// </summary>
+public class SubmitFormsData
+{
+    /// <summary>
+    /// The list of forms data.
+    /// </summary>
+    [Nested]
+    public IEnumerable<FormsItemData> FormsData { get; set; }
+}
+
+/// <summary>
+/// The data of the separate form item.
+/// </summary>
+public class FormsItemData
+{
+    /// <summary>
+    /// The form data key.
+    /// </summary>
+    /// <example>first_name</example>
+    public string Key { get; set; }
+
+    /// <summary>
+    /// The form data tag.
+    /// </summary>
+    /// <example>personal_info</example>
+    public string Tag { get; set; }
+
+    /// <summary>
+    /// The form data value.
+    /// </summary>
+    /// <example>John</example>
+    public string Value { get; set; }
+
+    /// <summary>
+    /// The form data type.
+    /// </summary>
+    /// <example>text</example>
+    public string Type { get; set; }
+}
+
+/// <summary>
+/// The database of forms items data.
+/// </summary>
+[Transient]
+public class DbFormsItemDataSearch : SubmitFormsData, ISearchItem
+{
+    /// <summary>
+    /// The form ID.
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// The tenant ID.
+    /// </summary>
+    public int TenantId { get; set; }
+
+    /// <summary>
+    /// The form parent ID.
+    /// </summary>
+    public int ParentId { get; set; }
+
+    /// <summary>
+    /// The original form ID.
+    /// </summary>
+    public int OriginalFormId { get; set; }
+
+    /// <summary>
+    /// The original form version.
+    /// </summary>
+    public int OriginalFormVersion { get; set; }
+
+    /// <summary>
+    /// The ID of the room where the form is located.
+    /// </summary>
+    public int RoomId { get; set; }
+
+    /// <summary>
+    /// The date and time when the form was created.
+    /// </summary>
+    public DateTime CreateOn { get; set; }
+
+    /// <summary>
+    /// The form index name.
+    /// </summary>
+    [Ignore]
+    public string IndexName => "forms_data";
+
+    public Expression<Func<ISearchItem, object[]>> GetSearchContentFields(SearchSettingsHelper searchSettings)
+    {
+        return a => new object[] { };
+    }
+}
+
+/// <summary>
+/// The OpenSearch document for form metadata (one instance per original form version).
+/// </summary>
+[Transient]
+public class DbFormsMetadataSearch : ISearchItem
+{
+    /// <summary>
+    /// The document ID. Encoded as a stable hash of (OriginalFormId, OriginalFormVersion).
+    /// </summary>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// The tenant ID.
+    /// </summary>
+    public int TenantId { get; set; }
+
+    /// <summary>
+    /// The original form ID.
+    /// </summary>
+    public int OriginalFormId { get; set; }
+
+    /// <summary>
+    /// The original form version.
+    /// </summary>
+    public int OriginalFormVersion { get; set; }
+
+    /// <summary>
+    /// The ID of the room where the form is located.
+    /// </summary>
+    public int RoomId { get; set; }
+
+    /// <summary>
+    /// The form field metadata.
+    /// </summary>
+    [Nested]
+    public IEnumerable<FormMetadata> Metadata { get; set; }
+
+    /// <summary>
+    /// The metadata index name.
+    /// </summary>
+    [Ignore]
+    public string IndexName => "forms_metadata";
+
+    public Expression<Func<ISearchItem, object[]>> GetSearchContentFields(SearchSettingsHelper searchSettings)
+        => _ => Array.Empty<object>();
+
+    /// <summary>
+    /// Computes a stable non-negative int document ID from the (OriginalFormId, OriginalFormVersion) pair.
+    /// </summary>
+    public static int ComputeId(int originalFormId, int originalFormVersion)
+    {
+        unchecked
+        {
+            var hash = 2166136261u;
+            hash = (hash ^ (uint)originalFormId) * 16777619u;
+            hash = (hash ^ (uint)originalFormVersion) * 16777619u;
+            return (int)(hash & int.MaxValue);
+        }
+    }
+}
+
+[Scope]
+public class BaseIndexerFormMetadata(Client client,
+    ILogger<BaseIndexerFormMetadata> log,
+    IDbContextFactory<WebstudioDbContext> dbContextManager,
+    TenantManager tenantManager,
+    BaseIndexerHelper baseIndexerHelper,
+    Settings settings,
+    IServiceProvider serviceProvider)
+    : BaseIndexer<DbFormsMetadataSearch>(client, log, dbContextManager, tenantManager, baseIndexerHelper, settings, serviceProvider);
+
+[Scope(typeof(IFactoryIndexer))]
+public class FactoryIndexerFormMetadata(
+    ILoggerFactory loggerFactory,
+    TenantManager tenantManager,
+    SearchSettingsHelper searchSettingsHelper,
+    FactoryIndexer factoryIndexer,
+    BaseIndexerFormMetadata baseIndexer,
+    IServiceProvider serviceProvider,
+    ICache cache)
+    : FactoryIndexer<DbFormsMetadataSearch>(loggerFactory, tenantManager, searchSettingsHelper, factoryIndexer, baseIndexer, serviceProvider, cache)
+{
+    public override async Task IndexAllAsync()
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            await foreach (var _ in _indexer.IndexAllAsync(GetCount, GetIds, GetData))
+            {
+
+            }
+
+            await _indexer.OnComplete(now);
+        }
+        catch (Exception e)
+        {
+            Logger.ErrorFactoryIndexerFile(e);
+            throw;
+        }
+
+        return;
+
+        List<int> GetIds(DateTime lastIndexed)
+        {
+            return [];
+        }
+
+        List<DbFormsMetadataSearch> GetData(long start, long stop, DateTime lastIndexed)
+        {
+            return [];
+
+        }
+
+        (int, int, int) GetCount(DateTime lastIndexed)
+        {
+            return new ValueTuple<int, int, int>(0, 0, 0);
+        }
+    }
+}
+
+[Scope]
+public class BaseIndexerForm(Client client,
+    ILogger<BaseIndexerForm> log,
+    IDbContextFactory<WebstudioDbContext> dbContextManager,
+    TenantManager tenantManager,
+    BaseIndexerHelper baseIndexerHelper,
+    Settings settings,
+    IServiceProvider serviceProvider)
+    : BaseIndexer<DbFormsItemDataSearch>(client, log, dbContextManager, tenantManager, baseIndexerHelper, settings, serviceProvider);
+
+[Scope(typeof(IFactoryIndexer))]
+public class FactoryIndexerForm(
+    ILoggerFactory loggerFactory,
+    TenantManager tenantManager,
+    SearchSettingsHelper searchSettingsHelper,
+    FactoryIndexer factoryIndexer,
+    BaseIndexerForm baseIndexer,
+    IServiceProvider serviceProvider,
+    ICache cache)
+    : FactoryIndexer<DbFormsItemDataSearch>(loggerFactory, tenantManager, searchSettingsHelper, factoryIndexer, baseIndexer, serviceProvider, cache)
+{
+    public override async Task IndexAllAsync()
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            await foreach (var _ in _indexer.IndexAllAsync(GetCount, GetIds, GetData))
+            {
+
+            }
+
+            await _indexer.OnComplete(now);
+        }
+        catch (Exception e)
+        {
+            Logger.ErrorFactoryIndexerFile(e);
+            throw;
+        }
+
+        return;
+
+        List<int> GetIds(DateTime lastIndexed)
+        {
+            return [];
+        }
+
+        List<DbFormsItemDataSearch> GetData(long start, long stop, DateTime lastIndexed)
+        {
+            return [];
+
+        }
+
+        (int, int, int) GetCount(DateTime lastIndexed)
+        {
+            return new ValueTuple<int, int, int>(0, 0, 0);
+        }
+    }
+}

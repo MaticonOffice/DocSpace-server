@@ -1,0 +1,341 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core;
+
+/// <summary>
+/// The file editing history parameters.
+/// </summary>
+[Transient]
+[DebuggerDisplay("{ID} v{Version}")]
+public class EditHistory(ILogger<EditHistory> logger,
+    TenantUtil tenantUtil,
+    UserManager userManager,
+    DisplayUserSettingsHelper displayUserSettingsHelper)
+{
+
+    /// <summary>
+    /// The document ID.
+    /// </summary>
+    public int ID { get; set; }
+
+    /// <summary>
+    /// The document identifier used to unambiguously identify the document file.
+    /// </summary>
+    public string Key { get; set; }
+
+    /// <summary>
+    /// The document version number.
+    /// </summary>
+    public int Version { get; set; }
+
+    /// <summary>
+    /// The document version group.
+    /// </summary>
+    public int VersionGroup { get; set; }
+
+    /// <summary>
+    /// The date and time of the document modifications.
+    /// </summary>
+    public DateTime ModifiedOn { get; set; }
+
+    /// <summary>
+    /// The author ID who modified the document.
+    /// </summary>
+    public Guid ModifiedBy { get; set; }
+
+    /// <summary>
+    /// The file editing changes.
+    /// </summary>
+    public string ChangesString { get; set; }
+
+    /// <summary>
+    /// The current server version number.
+    /// </summary>
+    public string ServerVersion { get; set; }
+
+    /// <summary>
+    /// The list of changes of the file editing history.
+    /// </summary>
+    public List<EditHistoryChanges> Changes
+    {
+        get
+        {
+            var changes = new List<EditHistoryChanges>();
+            if (string.IsNullOrEmpty(ChangesString))
+            {
+                return changes;
+            }
+
+            try
+            {
+                var options = new JsonSerializerOptions
+                {
+                    AllowTrailingCommas = true,
+                    PropertyNameCaseInsensitive = true
+                };
+
+                var jObject = JsonSerializer.Deserialize<ChangesDataList>(ChangesString, options);
+                ServerVersion = jObject.ServerVersion;
+
+                if (string.IsNullOrEmpty(ServerVersion))
+                {
+                    return changes;
+                }
+
+                changes = jObject.Changes.Select(r =>
+                {
+                    var result = new EditHistoryChanges
+                    {
+                        Author = new EditHistoryAuthor(userManager, displayUserSettingsHelper)
+                        {
+                            Id = r.User.Id ?? "",
+                            Name = r.User.Name
+                        }
+                    };
+
+
+                    if (DateTime.TryParse(r.Created, out var _date))
+                    {
+                        _date = tenantUtil.DateTimeFromUtc(_date);
+                    }
+                    result.Date = _date;
+                    result.DocumentSha256 = r.DocumentSha256;
+
+                    return result;
+                })
+                .ToList();
+
+                return changes;
+            }
+            catch (Exception ex)
+            {
+                logger.ErrorDeSerializeOldScheme(ex);
+            }
+
+            return changes;
+        }
+        set => throw new NotImplementedException();
+    }
+}
+
+/// <summary>
+/// The data list of the file changes.
+/// </summary>
+internal class ChangesDataList
+{
+    /// <summary>
+    /// The current server version number.
+    /// </summary>
+    public string ServerVersion { get; set; }
+
+    /// <summary>
+    /// The array of the file changes.
+    /// </summary>
+    public ChangesData[] Changes { get; set; }
+}
+
+/// <summary>
+/// The data item of the file changes.
+/// </summary>
+internal class ChangesData
+{
+    /// <summary>
+    /// The date when the file change was created.
+    /// </summary>
+    public string Created { get; set; }
+
+    /// <summary>
+    /// The user who changed the file.
+    /// </summary>
+    public ChangesUserData User { get; set; }
+
+    /// <summary>
+    /// The document hash generated by the SHA-256 algorithm.
+    /// </summary>
+    public string DocumentSha256 { get; set; }
+}
+
+/// <summary>
+/// The parameters of the user who changed the file.
+/// </summary>
+internal class ChangesUserData
+{
+    /// <summary>
+    /// The user ID.
+    /// </summary>
+    public string Id { get; set; }
+
+    /// <summary>
+    /// The user name.
+    /// </summary>
+    public string Name { get; set; }
+}
+
+/// <summary>
+/// The information about the file editing history author.
+/// </summary>
+[DebuggerDisplay("{Id} {Name}")]
+public class EditHistoryAuthor(UserManager userManager, DisplayUserSettingsHelper displayUserSettingsHelper)
+{
+    /// <summary>
+    /// The author ID.
+    /// </summary>
+    /// <example>author_123</example>
+    public required string Id { get; init; }
+
+    /// <summary>
+    /// The author name.
+    /// </summary>
+    /// <example>John Doe</example>
+    public string Name
+    {
+        get
+        {
+            if (!Guid.TryParse(Id, out var idInternal))
+            {
+                return field;
+            }
+
+            UserInfo user;
+            return
+                idInternal.Equals(Guid.Empty)
+                || idInternal.Equals(ASC.Core.Configuration.Constants.Guest.ID)
+                || (user = userManager.GetUsers(idInternal)).Equals(Constants.LostUser)
+                    ? string.IsNullOrEmpty(field)
+                        ? FilesCommonResource.Guest
+                        : field
+                    : user.DisplayUserName(false, displayUserSettingsHelper);
+        }
+        init;
+    }
+}
+
+/// <summary>
+/// The information about file editing history changes.
+/// </summary>
+[DebuggerDisplay("{Author.Name}")]
+public class EditHistoryChanges
+{
+    /// <summary>
+    /// The author who changed the file.
+    /// </summary>
+    public EditHistoryAuthor Author { get; init; }
+
+    /// <summary>
+    /// The date and time of the file changes.
+    /// </summary>
+    public DateTime Date { get; set; }
+
+    /// <summary>
+    /// The document hash generated by the SHA-256 algorithm.
+    /// </summary>
+    public string DocumentSha256 { get; set; }
+}
+
+/// <summary>
+/// The file editing history data.
+/// </summary>
+[DebuggerDisplay("{Version}")]
+public class EditHistoryDataDto
+{
+    /// <summary>
+    /// The URL address of the file with the document changes data.
+    /// </summary>
+    /// <example>https://example.com/changes</example>
+    [Url]
+    public string ChangesUrl { get; set; }
+
+    /// <summary>
+    /// The document identifier used to unambiguously identify the document file.
+    /// </summary>
+    /// <example>doc1</example>
+    public required string Key { get; set; }
+
+    /// <summary>
+    /// The object of the previous version of the document.
+    /// </summary>
+    /// <example>{"url": "https://example.com/prev.docx", "key": "prev-doc-key"}</example>
+    public EditHistoryUrl Previous { get; set; }
+
+    /// <summary>
+    /// The encrypted signature added to the parameter in the form of a token.
+    /// </summary>
+    /// <example>token</example>
+    public string Token { get; set; }
+
+    /// <summary>
+    /// The URL address of the current document version.
+    /// </summary>
+    /// <example>https://example.com/file.docx</example>
+    [Url]
+    public required string Url { get; set; }
+
+    /// <summary>
+    /// The document version number.
+    /// </summary>
+    /// <example>1</example>
+    public required int Version { get; init; }
+
+    /// <summary>
+    /// The document extension.
+    /// </summary>
+    /// <example>docx</example>
+    public required string FileType { get; set; }
+}
+
+/// <summary>
+/// The file editing history URL parameters.
+/// </summary>
+[DebuggerDisplay("{Key} - {Url}")]
+public class EditHistoryUrl
+{
+    /// <summary>
+    /// The document identifier of the previous version of the document.
+    /// </summary>
+    /// <example>doc_v2_20260101</example>
+    public string Key { get; init; }
+
+    /// <summary>
+    /// The url address of the previous version of the document.
+    /// </summary>
+    /// <example>https://files.example.com/history/doc_v2_20260101.docx</example>
+    [Url]
+    public string Url { get; init; }
+
+    /// <summary>
+    /// The document extension.
+    /// </summary>
+    /// <example>.docx</example>
+    public string FileType { get; set; }
+}

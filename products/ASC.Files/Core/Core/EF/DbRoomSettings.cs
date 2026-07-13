@@ -1,0 +1,214 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core.EF;
+
+public class DbRoomSettings
+{
+    public int RoomId { get; set; }
+    public int TenantId { get; set; }
+    public bool Private { get; set; }
+    public bool HasLogo { get; set; }
+    
+    [MaxLength(6)]
+    public string Color { get; set; }
+    
+    [MaxLength(50)]
+    public string Cover { get; set; }
+    
+    public bool Indexing { get; set; }
+    public long Quota { get; set; }
+    public DbRoomWatermark Watermark { get; set; }
+    public bool DenyDownload { get; set; }
+    public DbRoomDataLifetime Lifetime { get; set; }
+    public int ChatProviderId { get; set; }
+    public ChatParameters ChatParameters { get; set; }
+    public bool SendFormToExternalDB { get; set; }
+    public bool SaveFormAsXLSX { get; set; }
+    
+    public DbTenant Tenant { get; set; }
+    public DbFolder Room { get; set; }
+}
+
+public static class DbRoomSettingsExtension
+{
+    public static ModelBuilderWrapper AddDbRoomSettings(this ModelBuilderWrapper modelBuilder)
+    {
+        modelBuilder.Entity<DbRoomSettings>().Navigation(e => e.Tenant).AutoInclude(false);
+        modelBuilder.Entity<DbRoomSettings>().Navigation(e => e.Room).AutoInclude(false);
+
+        modelBuilder
+            .Add(MySqlAddDbRoomSettings, Provider.MySql)
+            .Add(PgSqlAddDbRoomSettings, Provider.PostgreSql);
+
+        return modelBuilder;
+    }
+
+    extension(ModelBuilder modelBuilder)
+    {
+        private void MySqlAddDbRoomSettings()
+        {
+            modelBuilder.Entity<DbRoomSettings>(entity =>
+            {
+                entity.ToTable("files_room_settings")
+                    .HasCharSet("utf8");
+
+                entity.HasKey(e => new { e.TenantId, e.RoomId })
+                    .HasName("primary");
+
+                entity.Property(e => e.RoomId).HasColumnName("room_id");
+
+                entity.Property(e => e.Private)
+                    .HasColumnName("private")
+                    .HasDefaultValueSql("'0'");
+
+                entity.Property(e => e.HasLogo).HasColumnName("has_logo").HasDefaultValueSql("0");
+
+                entity.Property(e => e.Indexing).HasColumnName("indexing").HasDefaultValueSql("0");
+
+                entity.Property(e => e.Watermark)
+                    .HasColumnName("watermark")
+                    .HasColumnType("json")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.Color)
+                    .HasColumnName("color")
+                    .HasColumnType("char")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.Cover)
+                    .HasColumnName("cover")
+                    .HasColumnType("varchar")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.TenantId).HasColumnName("tenant_id");
+
+                entity.Property(e => e.Quota)
+                    .HasColumnName("quota")
+                    .HasDefaultValueSql("'-2'");
+
+                entity.Property(e => e.Lifetime)
+                    .HasColumnName("lifetime")
+                    .HasColumnType("json")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.DenyDownload).HasColumnName("deny_download").HasDefaultValueSql("0");
+            
+                entity.Property(e => e.ChatProviderId)
+                    .HasColumnName("chat_provider_id");
+            
+                entity.HasIndex(e => e.ChatProviderId)
+                    .HasDatabaseName("IX_chat_provider_id");
+            
+                entity.Property(e => e.ChatParameters)
+                    .HasColumnName("chat_settings")
+                    .HasColumnType("json")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.SendFormToExternalDB)
+                    .HasColumnName("send_form_to_external_db")
+                    .HasDefaultValueSql("0");
+
+                entity.Property(e => e.SaveFormAsXLSX)
+                    .HasColumnName("save_form_as_xlsx")
+                    .HasDefaultValue(true);
+            });
+        }
+
+        private void PgSqlAddDbRoomSettings()
+        {
+            modelBuilder.Entity<DbRoomSettings>(entity =>
+            {
+                entity.ToTable("files_room_settings");
+
+                entity.HasKey(e => new { e.TenantId, e.RoomId })
+                    .HasName("pk_files_room_settings");
+
+                entity.Property(e => e.RoomId)
+                    .HasColumnName("room_id");
+
+                entity.Property(e => e.Private)
+                    .HasColumnName("private")
+                    .HasDefaultValueSql("false");
+
+                entity.Property(e => e.HasLogo)
+                    .HasColumnName("has_logo")
+                    .HasDefaultValueSql("false");
+
+                entity.Property(e => e.Indexing)
+                    .HasColumnName("indexing")
+                    .HasDefaultValueSql("false");
+
+                entity.Property(e => e.Watermark)
+                    .HasColumnName("watermark")
+                    .HasColumnType("jsonb");
+
+                entity.Property(e => e.Color)
+                    .HasColumnName("color")
+                    .HasColumnType("char(6)");
+
+                entity.Property(e => e.Cover)
+                    .HasColumnName("cover")
+                    .HasColumnType("varchar(50)");
+
+                entity.Property(e => e.TenantId)
+                    .HasColumnName("tenant_id");
+
+                entity.Property(e => e.Quota)
+                    .HasColumnName("quota")
+                    .HasDefaultValueSql("-2");
+
+                entity.Property(e => e.Lifetime)
+                    .HasColumnName("lifetime")
+                    .HasColumnType("jsonb");
+
+                entity.Property(e => e.DenyDownload)
+                    .HasColumnName("deny_download")
+                    .HasDefaultValueSql("false");
+
+                entity.Property(e => e.SendFormToExternalDB)
+                    .HasColumnName("send_form_to_external_db")
+                    .HasDefaultValueSql("false");
+
+                entity.Property(e => e.SaveFormAsXLSX)
+                    .HasColumnName("save_form_as_xlsx")
+                    .HasDefaultValue(true);
+            });
+        }
+    }
+}

@@ -1,0 +1,176 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.Controllers.Settings;
+
+[DefaultRoute("customnavigation")]
+[ApiExplorerSettings(IgnoreApi = true)]
+public class CustomNavigationController(
+    MessageService messageService,
+    PermissionContext permissionContext,
+    SettingsManager settingsManager,
+    WebItemManager webItemManager,
+    StorageHelper storageHelper,
+    IFusionCache fusionCache)
+    : BaseSettingsController(fusionCache, webItemManager)
+{
+    /// <remarks>
+    /// Returns a list of the custom navigation items.
+    /// </remarks>
+    /// <summary>Get the custom navigation items</summary>
+    /// <path>api/2.0/settings/customnavigation/getall</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Custom Navigation")]
+    [SwaggerResponse(200, "List of the custom navigation items", typeof(List<CustomNavigationItem>))]
+    [HttpGet("getall")]
+    public async Task<List<CustomNavigationItem>> GetCustomNavigationItems()
+    {
+        return (await settingsManager.LoadAsync<CustomNavigationSettings>()).Items;
+    }
+
+    /// <remarks>
+    /// Returns a sample of the custom navigation item.
+    /// </remarks>
+    /// <summary>Get a custom navigation item sample</summary>
+    /// <path>api/2.0/settings/customnavigation/getsample</path>
+    [Tags("Settings / Custom Navigation")]
+    [SwaggerResponse(200, "Custom navigation item", typeof(CustomNavigationItem))]
+    [HttpGet("getsample")]
+    public CustomNavigationItem GetCustomNavigationItemSample()
+    {
+        return CustomNavigationItem.GetSample();
+    }
+
+    /// <remarks>
+    /// Returns a custom navigation item by the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get a custom navigation item by ID</summary>
+    /// <path>api/2.0/settings/customnavigation/get/{id}</path>
+    [Tags("Settings / Custom Navigation")]
+    [SwaggerResponse(200, "Custom navigation item", typeof(CustomNavigationItem))]
+    [HttpGet("get/{id:guid}")]
+    public async Task<CustomNavigationItem> GetCustomNavigationItem(IdRequestDto<Guid> inDto)
+    {
+        return (await settingsManager.LoadAsync<CustomNavigationSettings>()).Items.Find(item => item.Id == inDto.Id);
+    }
+
+    /// <remarks>
+    /// Adds a custom navigation item with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>Add a custom navigation item</summary>
+    /// <path>api/2.0/settings/customnavigation/create</path>
+    [Tags("Settings / Custom Navigation")]
+    [SwaggerResponse(200, "Custom navigation item", typeof(CustomNavigationItem))]
+    [HttpPost("create")]
+    public async Task<CustomNavigationItem> CreateCustomNavigationItem(CustomNavigationItem inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var settings = await settingsManager.LoadAsync<CustomNavigationSettings>();
+
+        var exist = false;
+
+        foreach (var existItem in settings.Items)
+        {
+            if (existItem.Id != inDto.Id)
+            {
+                continue;
+            }
+
+            existItem.Label = inDto.Label;
+            existItem.Url = inDto.Url;
+            existItem.ShowInMenu = inDto.ShowInMenu;
+            existItem.ShowOnHomePage = inDto.ShowOnHomePage;
+
+            if (existItem.SmallImg != inDto.SmallImg)
+            {
+                await storageHelper.DeleteLogoAsync(existItem.SmallImg);
+                existItem.SmallImg = await storageHelper.SaveTmpLogo(inDto.SmallImg);
+            }
+
+            if (existItem.BigImg != inDto.BigImg)
+            {
+                await storageHelper.DeleteLogoAsync(existItem.BigImg);
+                existItem.BigImg = await storageHelper.SaveTmpLogo(inDto.BigImg);
+            }
+
+            exist = true;
+            break;
+        }
+
+        if (!exist)
+        {
+            inDto.Id = Guid.NewGuid();
+            inDto.SmallImg = await storageHelper.SaveTmpLogo(inDto.SmallImg);
+            inDto.BigImg = await storageHelper.SaveTmpLogo(inDto.BigImg);
+
+            settings.Items.Add(inDto);
+        }
+
+        await settingsManager.SaveAsync(settings);
+
+        messageService.Send(MessageAction.CustomNavigationSettingsUpdated);
+
+        return inDto;
+    }
+
+    /// <remarks>
+    /// Deletes a custom navigation item with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Delete a custom navigation item</summary>
+    /// <path>api/2.0/settings/customnavigation/delete/{id}</path>
+    [Tags("Settings / Custom Navigation")]
+    [SwaggerResponse(200, "Ok")]
+    [HttpDelete("delete/{id:guid}")]
+    public async Task DeleteCustomNavigationItem(IdRequestDto<Guid> inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var settings = await settingsManager.LoadAsync<CustomNavigationSettings>();
+
+        var target = settings.Items.Find(item => item.Id == inDto.Id);
+
+        if (target == null)
+        {
+            return;
+        }
+
+        await storageHelper.DeleteLogoAsync(target.SmallImg);
+        await storageHelper.DeleteLogoAsync(target.BigImg);
+
+        settings.Items.Remove(target);
+        await settingsManager.SaveAsync(settings);
+
+        messageService.Send(MessageAction.CustomNavigationSettingsUpdated);
+    }
+}

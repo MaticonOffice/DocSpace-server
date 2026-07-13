@@ -1,0 +1,736 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Files.Classes;
+
+/// <summary>
+/// The file settings parameters.
+/// </summary>
+public class FilesSettings : ISettings<FilesSettings>
+{
+    /// <summary>
+    /// Specifies whether to allow users to connect third-party storages.
+    /// </summary>
+    [JsonPropertyName("EnableThirdpartySettings")]
+    public bool EnableThirdpartySetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to display notification when moving the element to the trash.
+    /// </summary>
+    [JsonPropertyName("FastDelete")]
+    public bool FastDeleteSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to save the file copy in the original format as well.
+    /// </summary>
+    [JsonPropertyName("StoreOriginalFiles")]
+    public bool StoreOriginalFilesSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to assign a default name to the newly created file.
+    /// </summary>
+    [JsonPropertyName("KeepNewFileName")]
+    public bool KeepNewFileName { get; set; }
+
+    /// <summary>
+    /// Specifies whether to display file extension next to file name.
+    /// </summary>
+    public bool DisplayFileExtension { get; set; }
+
+    /// <summary>
+    /// Specifies whether to notify about file conversion.
+    /// </summary>
+    [JsonPropertyName("ConvertNotify")]
+    public bool ConvertNotifySetting { get; set; }
+
+    /// <summary>
+    /// Specifies the default parameters by which the files will be sorted.
+    /// </summary>
+    [JsonPropertyName("DefaultSortedBy")]
+    public SortedByType DefaultSortedBySetting { get; set; }
+
+    /// <summary>
+    /// Specifies the default file order (ascending or not).
+    /// </summary>
+    [JsonPropertyName("DefaultSortedAsc")]
+    public bool DefaultSortedAscSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to hide the confirmation dialog for the cancel operation.
+    /// </summary>
+    [JsonPropertyName("HideConfirmCancelOperation")]
+    public bool HideConfirmCancelOperationSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to hide the confirmation dialog
+    /// for saving the file copy in the original format when converting a file.
+    /// </summary>
+    [JsonPropertyName("HideConfirmConvertSave")]
+    public bool HideConfirmConvertSaveSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to hide the confirmation dialog
+    /// for opening the conversion result.
+    /// </summary>
+    [JsonPropertyName("HideConfirmConvertOpen")]
+    public bool HideConfirmConvertOpenSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to hide the confirmation dialog about the file lifetime in the room.
+    /// </summary>
+    [JsonPropertyName("HideConfirmRoomLifetime")]
+    public bool HideConfirmRoomLifetimeSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to forcesave the files or not.
+    /// </summary>
+    [JsonPropertyName("Forcesave")]
+    public bool ForcesaveSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to store the forcesaved file versions or not.
+    /// </summary>
+    [JsonPropertyName("StoreForcesave")]
+    public bool StoreForcesaveSetting { get; set; }
+
+    /// <summary>
+    /// Specifies if the "Recent" section is hidden or not.
+    /// </summary>
+    [JsonPropertyName("HideRecent")]
+    public bool HideRecentSetting { get; set; }
+
+    /// <summary>
+    /// Specifies if the "Favorites" section is hidden or not.
+    /// </summary>
+    [JsonPropertyName("HideFavorites")]
+    public bool HideFavoritesSetting { get; set; }
+
+    /// <summary>
+    /// Specifies if the "Templates" section is hidden or not.
+    /// </summary>
+    [JsonPropertyName("HideTemplates")]
+    public bool HideTemplatesSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to download the .tar.gz files or not.
+    /// </summary>
+    [JsonPropertyName("DownloadZip")]
+    public bool DownloadTarGzSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to disable sharing external links to the files.
+    /// </summary>
+    [JsonPropertyName("ShareLink")]
+    public bool DisableShareLinkSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to disable sharing files on social media.
+    /// </summary>
+    [JsonPropertyName("ShareLinkSocialMedia")]
+    public bool DisableShareSocialMediaSetting { get; set; }
+
+    /// <summary>
+    /// The auto-clearing setting parameters.
+    /// </summary>
+    [JsonPropertyName("AutomaticallyCleanUp")]
+    public AutoCleanUpData AutomaticallyCleanUpSetting { get; set; }
+
+    /// <summary>
+    /// The default access rights in sharing settings.
+    /// </summary>
+    [JsonPropertyName("DefaultSharingAccessRights")]
+    public List<FileShare> DefaultSharingAccessRightsSetting { get; set; }
+
+    /// <summary>
+    /// Specifies whether to open the editor in the same tab or not.
+    /// </summary>
+    [JsonPropertyName("OpenEditorInSameTab")]
+    public bool OpenEditorInSameTab { get; set; }
+
+    /// <summary>
+    /// Specifies whether the grouping of rooms is enabled or not.
+    /// </summary>
+    [JsonPropertyName("OrganizeRoomsGrouping")]
+    public bool OrganizeRoomsGrouping { get; set; }
+
+    /// <summary>
+    /// Specifies the default sharing link type: true = DocSpace users only (internal), false = Anyone with the link.
+    /// </summary>
+    [JsonPropertyName("DefaultShareLinkInternal")]
+    public bool DefaultShareLinkInternalSetting { get; set; }
+
+    /// <summary>
+    /// When external sharing is restricted, specifies whether to apply the restriction to My Documents section.
+    /// </summary>
+    [JsonPropertyName("ExternalShareApplyToDocuments")]
+    public bool ExternalShareApplyToDocumentsSetting { get; set; }
+
+    /// <summary>
+    /// When external sharing is restricted, specifies whether to apply the restriction to Rooms section.
+    /// </summary>
+    [JsonPropertyName("ExternalShareApplyToRooms")]
+    public bool ExternalShareApplyToRoomsSetting { get; set; }
+
+    /// <summary>
+    /// When external sharing is restricted, specifies whether to block existing public links immediately.
+    /// </summary>
+    [JsonPropertyName("BlockExistingLinksOnRestrict")]
+    public bool BlockExistingLinksOnRestrictSetting { get; set; }
+
+    public FilesSettings GetDefault()
+    {
+        return new FilesSettings
+        {
+            FastDeleteSetting = false,
+            EnableThirdpartySetting = true,
+            StoreOriginalFilesSetting = true,
+            ConvertNotifySetting = true,
+            DefaultSortedBySetting = SortedByType.DateAndTime,
+            DefaultSortedAscSetting = false,
+            HideConfirmConvertSaveSetting = false,
+            HideConfirmConvertOpenSetting = false,
+            HideConfirmRoomLifetimeSetting = false,
+            ForcesaveSetting = true,
+            StoreForcesaveSetting = false,
+            HideRecentSetting = false,
+            HideFavoritesSetting = false,
+            HideTemplatesSetting = false,
+            DownloadTarGzSetting = false,
+            AutomaticallyCleanUpSetting = null,
+            DefaultSharingAccessRightsSetting = null,
+            OpenEditorInSameTab = false,
+            OrganizeRoomsGrouping = true,
+            DefaultShareLinkInternalSetting = false,
+            ExternalShareApplyToDocumentsSetting = true,
+            ExternalShareApplyToRoomsSetting = true,
+            BlockExistingLinksOnRestrictSetting = true
+        };
+    }
+
+    public DateTime LastModified { get; set; }
+
+    public static Guid ID => new("{03B382BD-3C20-4f03-8AB9-5A33F016316E}");
+}
+
+[Scope]
+public class FilesSettingsHelper(
+    Global global,
+    MessageService messageService,
+    SettingsManager settingsManager,
+    QuotaSocketManager quotaSocketManager,
+    AuthContext authContext)
+{
+    private static readonly FilesSettings _emptySettings = new();
+
+    public async Task<bool> GetConfirmDelete() => !(await LoadForCurrentUser()).FastDeleteSetting;
+
+    public async Task SetConfirmDelete(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.FastDeleteSetting = !value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetEnableThirdParty() => (await settingsManager.LoadAsync<FilesSettings>()).EnableThirdpartySetting;
+
+    public async Task SetEnableThirdParty(bool value)
+    {
+        if (!await global.IsDocSpaceAdministratorAsync)
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        var setting = await settingsManager.LoadAsync<FilesSettings>();
+        setting.EnableThirdpartySetting = value;
+        await settingsManager.SaveAsync(setting);
+        messageService.SendHeadersMessage(MessageAction.DocumentsThirdPartySettingsUpdated);
+    }
+
+    public async Task<bool> GetExternalShare()
+    {
+        return !(await Load()).DisableShareLinkSetting;
+    }
+
+    public async Task SetExternalShare(bool value)
+    {
+        var settings = await Load();
+        settings.DisableShareLinkSetting = !value;
+        await Save(settings);
+    }
+
+    public async Task<bool> GetExternalShareSocialMedia()
+    {
+        var setting = await Load();
+        return !setting.DisableShareLinkSetting && !setting.DisableShareSocialMediaSetting;
+    }
+
+    public async Task SetExternalShareSocialMedia(bool value)
+    {
+        var settings = await Load();
+        settings.DisableShareSocialMediaSetting = !value;
+        await Save(settings);
+    }
+
+    public async Task<bool> ChangeExternalShareSettingsAsync(bool enable)
+    {
+        if (!await global.IsDocSpaceAdministratorAsync)
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        await SetExternalShare(enable);
+
+        if (!enable)
+        {
+            await SetExternalShareSocialMedia(false);
+        }
+
+        messageService.SendHeadersMessage(MessageAction.DocumentsExternalShareSettingsUpdated);
+
+        return await GetExternalShare();
+    }
+
+    public async Task<bool> ChangeExternalShareSocialMediaSettingsAsync(bool enable)
+    {
+        if (!await global.IsDocSpaceAdministratorAsync)
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        await SetExternalShareSocialMedia(await GetExternalShare() && enable);
+
+        messageService.SendHeadersMessage(MessageAction.DocumentsExternalShareSettingsUpdated);
+
+        return await GetExternalShareSocialMedia();
+    }
+
+    public async Task<bool> GetStoreOriginalFiles() => (await LoadForCurrentUser()).StoreOriginalFilesSetting;
+
+    public async Task SetStoreOriginalFiles(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.StoreOriginalFilesSetting = value;
+        await SaveForCurrentUser(setting);
+
+        messageService.SendHeadersMessage(MessageAction.DocumentsUploadingFormatsSettingsUpdated);
+    }
+
+    public async Task<bool> GetKeepNewFileName() => (await LoadForCurrentUser()).KeepNewFileName;
+
+    public async Task<bool> SetKeepNewFileName(bool value)
+    {
+        var current = await LoadForCurrentUser();
+        if (current.KeepNewFileName != value)
+        {
+            current.KeepNewFileName = value;
+            await SaveForCurrentUser(current);
+            messageService.SendHeadersMessage(MessageAction.DocumentsKeepNewFileNameSettingsUpdated);
+        }
+
+        return current.KeepNewFileName;
+    }
+
+    public async Task<bool> GetDisplayFileExtension() => (await LoadForCurrentUser()).DisplayFileExtension;
+
+    public async Task<bool> SetDisplayFileExtension(bool value)
+    {
+        var current = await LoadForCurrentUser();
+        if (current.DisplayFileExtension != value)
+        {
+            current.DisplayFileExtension = value;
+            await SaveForCurrentUser(current);
+            messageService.SendHeadersMessage(MessageAction.DocumentsDisplayFileExtensionUpdated);
+        }
+
+        return current.DisplayFileExtension;
+    }
+
+    public async Task<bool> GetConvertNotify() => (await LoadForCurrentUser()).ConvertNotifySetting;
+
+    public async Task SetConvertNotify(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.ConvertNotifySetting = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetHideConfirmCancelOperation() => (await LoadForCurrentUser()).HideConfirmCancelOperationSetting;
+
+    public async Task<bool> SetHideConfirmCancelOperation(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+
+        if (setting.HideConfirmCancelOperationSetting != value)
+        {
+            setting.HideConfirmCancelOperationSetting = value;
+            await SaveForCurrentUser(setting);
+        }
+
+        return setting.HideConfirmCancelOperationSetting;
+    }
+
+    public async Task<bool> GetHideConfirmConvertSave() => (await LoadForCurrentUser()).HideConfirmConvertSaveSetting;
+
+    private async Task SetHideConfirmConvertSave(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.HideConfirmConvertSaveSetting = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetHideConfirmConvertOpen() => (await LoadForCurrentUser()).HideConfirmConvertOpenSetting;
+
+    private async Task SetHideConfirmConvertOpen(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.HideConfirmConvertOpenSetting = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> HideConfirmConvert(bool isForSave)
+    {
+        if (isForSave)
+        {
+            await SetHideConfirmConvertSave(true);
+        }
+        else
+        {
+            await SetHideConfirmConvertOpen(true);
+        }
+
+        return true;
+    }
+
+    public async Task<bool> GetHideConfirmRoomLifetime() => (await LoadForCurrentUser()).HideConfirmRoomLifetimeSetting;
+
+    public async Task<bool> SetHideConfirmRoomLifetime(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+
+        if (setting.HideConfirmRoomLifetimeSetting != value)
+        {
+            setting.HideConfirmRoomLifetimeSetting = value;
+            await SaveForCurrentUser(setting);
+        }
+
+        return setting.HideConfirmRoomLifetimeSetting;
+    }
+
+    public async Task<OrderBy> GetDefaultOrder()
+    {
+        var setting = await LoadForCurrentUser();
+
+        return new OrderBy(setting.DefaultSortedBySetting, setting.DefaultSortedAscSetting);
+    }
+
+    public async Task SetDefaultOrder(OrderBy value)
+    {
+        var setting = await LoadForCurrentUser();
+        if (setting.DefaultSortedBySetting != value.SortedBy || setting.DefaultSortedAscSetting != value.IsAsc)
+        {
+            setting.DefaultSortedBySetting = value.SortedBy;
+            setting.DefaultSortedAscSetting = value.IsAsc;
+            await SaveForCurrentUser(setting);
+        }
+    }
+
+    public async Task SetOpenEditorInSameTabAsync(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.OpenEditorInSameTab = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetOpenEditorInSameTabAsync()
+    {
+        return (await LoadForCurrentUser()).OpenEditorInSameTab;
+    }
+
+    public async Task SetOrganizeRoomsGroupingAsync(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.OrganizeRoomsGrouping = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetOrganizeRoomsGroupingAsync()
+    {
+        return (await LoadForCurrentUser()).OrganizeRoomsGrouping;
+    }
+
+    public async Task<FilesSettings> GetTenantFilesSettingsAsync()
+    {
+        return await settingsManager.LoadAsync<FilesSettings>();
+    }
+
+    public async Task<bool> GetDefaultShareLinkInternal()
+    {
+        return (await Load()).DefaultShareLinkInternalSetting;
+    }
+
+    public async Task<bool> GetExternalShareApplyToDocuments()
+    {
+        return (await Load()).ExternalShareApplyToDocumentsSetting;
+    }
+
+    public async Task<bool> GetExternalShareApplyToRooms()
+    {
+        return (await Load()).ExternalShareApplyToRoomsSetting;
+    }
+
+    public async Task<bool> GetBlockExistingLinksOnRestrict()
+    {
+        return (await Load()).BlockExistingLinksOnRestrictSetting;
+    }
+
+    public async Task<ExternalSharingSettingsDto> ChangeExternalSharingSettingsAsync(ExternalSharingSettingsRequestDto inDto)
+    {
+        if (!await global.IsDocSpaceAdministratorAsync)
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        var settings = await settingsManager.LoadAsync<FilesSettings>();
+        settings.DisableShareLinkSetting = !inDto.ExternalShare;
+        settings.DefaultShareLinkInternalSetting = !inDto.ExternalShare || inDto.DefaultShareLinkInternal;
+        settings.ExternalShareApplyToDocumentsSetting = inDto.ExternalShareApplyToDocuments;
+        settings.ExternalShareApplyToRoomsSetting = inDto.ExternalShareApplyToRooms;
+        settings.BlockExistingLinksOnRestrictSetting = inDto.BlockExistingLinksOnRestrict;
+
+        if (settings.DisableShareLinkSetting)
+        {
+            settings.DisableShareSocialMediaSetting = true;
+        }
+
+        await settingsManager.SaveAsync(settings);
+
+        var res = new ExternalSharingSettingsDto
+        {
+            ExternalShare = !settings.DisableShareLinkSetting,
+            DefaultShareLinkInternal = settings.DefaultShareLinkInternalSetting,
+            ExternalShareApplyToDocuments = settings.ExternalShareApplyToDocumentsSetting,
+            ExternalShareApplyToRooms = settings.ExternalShareApplyToRoomsSetting,
+            BlockExistingLinksOnRestrict = settings.BlockExistingLinksOnRestrictSetting
+        };
+
+        messageService.SendHeadersMessage(MessageAction.DocumentsExternalShareSettingsUpdated);
+
+        await quotaSocketManager.ChangeExternalSharingSettingsAsync(
+            res.ExternalShare,
+            res.DefaultShareLinkInternal,
+            res.ExternalShareApplyToDocuments,
+            res.ExternalShareApplyToRooms,
+            res.BlockExistingLinksOnRestrict);
+
+        return res;
+    }
+
+    public bool GetForcesave() => true;
+
+    public void SetForcesave(bool value)
+    {
+        //var setting = await LoadForCurrentUser();
+        //setting.ForcesaveSetting = value;
+        //await SaveForCurrentUser(setting);
+        //messageService.SendHeadersMessageAsync(MessageAction.DocumentsForcesave);
+    }
+
+    public bool GetStoreForcesave() => false;
+
+    public void SetStoreForcesave(bool value)
+    {
+        //     if (!await global.IsDocSpaceAdministratorAsync)
+        //     {
+        //         throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException);
+        //     }
+        //var setting = _settingsManager.Load<FilesSettings>();
+        //setting.StoreForcesaveSetting = value;
+        //_settingsManager.Save(setting);
+        //messageService.SendHeadersMessageAsync(MessageAction.DocumentsStoreForcesave);
+    }
+
+    public async Task<bool> GetRecentSection() => !(await LoadForCurrentUser()).HideRecentSetting;
+
+    public async Task SetRecentSection(bool value)
+    {
+        if (!authContext.IsAuthenticated)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        var setting = await LoadForCurrentUser();
+        setting.HideRecentSetting = !value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetFavoritesSection() => !(await LoadForCurrentUser()).HideFavoritesSetting;
+
+    public async Task SetFavoritesSection(bool value)
+    {
+        if (!authContext.IsAuthenticated)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+
+        var setting = await LoadForCurrentUser();
+        setting.HideFavoritesSetting = !value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetTemplatesSection() => !(await LoadForCurrentUser()).HideTemplatesSetting;
+
+    public async Task SetTemplatesSection(bool value)
+    {
+        if (!authContext.IsAuthenticated)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_SecurityException);
+        }
+        var setting = await LoadForCurrentUser();
+        setting.HideTemplatesSetting = !value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<bool> GetDownloadTarGz() => (await LoadForCurrentUser()).DownloadTarGzSetting;
+
+    public async Task SetDownloadTarGz(bool value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.DownloadTarGzSetting = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<AutoCleanUpData> GetAutomaticallyCleanUp()
+    {
+        var setting = (await LoadForCurrentUser()).AutomaticallyCleanUpSetting;
+
+        if (setting != null)
+        {
+            return setting;
+        }
+
+        setting = AutoCleanUpData.GetDefault();
+        await SetAutomaticallyCleanUp(setting);
+
+        return setting;
+    }
+
+    public async Task SetAutomaticallyCleanUp(AutoCleanUpData value)
+    {
+        var setting = await LoadForCurrentUser();
+        setting.AutomaticallyCleanUpSetting = value;
+        await SaveForCurrentUser(setting);
+    }
+
+    public async Task<List<FileShare>> GetDefaultSharingAccessRights()
+    {
+        var setting = (await LoadForCurrentUser()).DefaultSharingAccessRightsSetting;
+        return setting ?? [FileShare.Read];
+    }
+
+    public async Task SetDefaultSharingAccessRights(List<FileShare> value)
+    {
+        List<FileShare> GetNormalizedList(List<FileShare> src)
+        {
+            if (src == null || src.Count == 0)
+            {
+                return null;
+            }
+
+            var res = new List<FileShare>();
+
+            if (src.Contains(FileShare.FillForms))
+            {
+                res.Add(FileShare.FillForms);
+            }
+
+            if (src.Contains(FileShare.CustomFilter))
+            {
+                res.Add(FileShare.CustomFilter);
+            }
+
+            if (src.Contains(FileShare.Review))
+            {
+                res.Add(FileShare.Review);
+            }
+
+            if (src.Contains(FileShare.ReadWrite))
+            {
+                res.Add(FileShare.ReadWrite);
+                return res;
+            }
+
+            if (src.Contains(FileShare.Comment))
+            {
+                res.Add(FileShare.Comment);
+                return res;
+            }
+
+            res.Add(FileShare.Read);
+            return res;
+        }
+
+        var setting = await LoadForCurrentUser();
+        setting.DefaultSharingAccessRightsSetting = GetNormalizedList(value);
+        await SaveForCurrentUser(setting);
+    }
+
+    private async Task<FilesSettings> Load()
+    {
+        return !authContext.IsAuthenticated ? _emptySettings : await settingsManager.LoadAsync<FilesSettings>();
+    }
+
+    private async Task Save(FilesSettings settings)
+    {
+        if (!authContext.IsAuthenticated)
+        {
+            return;
+        }
+
+        await settingsManager.SaveAsync(settings);
+    }
+
+    private async Task<FilesSettings> LoadForCurrentUser()
+    {
+        return !authContext.IsAuthenticated ? _emptySettings : await settingsManager.LoadForCurrentUserAsync<FilesSettings>();
+    }
+
+    private async Task SaveForCurrentUser(FilesSettings settings)
+    {
+        if (!authContext.IsAuthenticated)
+        {
+            return;
+        }
+
+        await settingsManager.SaveForCurrentUserAsync(settings);
+    }
+}

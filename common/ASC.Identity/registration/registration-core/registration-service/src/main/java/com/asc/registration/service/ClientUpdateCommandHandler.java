@@ -1,0 +1,368 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.service;
+
+import com.asc.common.core.domain.entity.Audit;
+import com.asc.common.core.domain.value.ClientId;
+import com.asc.common.core.domain.value.Role;
+import com.asc.common.core.domain.value.TenantId;
+import com.asc.common.core.domain.value.UserId;
+import com.asc.common.core.domain.value.enums.AuthenticationMethod;
+import com.asc.common.service.ports.output.message.publisher.AuthorizationMessagePublisher;
+import com.asc.common.service.transfer.message.ClientRemovedEvent;
+import com.asc.common.service.transfer.response.ClientResponse;
+import com.asc.common.utilities.crypto.EncryptionService;
+import com.asc.registration.core.domain.ClientDomainService;
+import com.asc.registration.core.domain.entity.Client;
+import com.asc.registration.core.domain.exception.ClientDomainException;
+import com.asc.registration.core.domain.exception.ClientNotFoundException;
+import com.asc.registration.core.domain.exception.OptimisticLockingException;
+import com.asc.registration.core.domain.value.ClientInfo;
+import com.asc.registration.core.domain.value.ClientRedirectInfo;
+import com.asc.registration.service.mapper.ClientDataMapper;
+import com.asc.registration.service.ports.output.repository.ClientCommandRepository;
+import com.asc.registration.service.ports.output.repository.ClientQueryRepository;
+import com.asc.registration.service.ports.output.resilience.RetryExecutor;
+import com.asc.registration.service.transfer.request.update.*;
+import com.asc.registration.service.transfer.response.ClientSecretResponse;
+import java.util.UUID;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+
+/**
+ * ClientUpdateCommandHandler handles the updates of the existing clients. This component
+ * coordinates the client update process by interacting with the domain service, repository, and
+ * event publisher.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class ClientUpdateCommandHandler {
+  private static final String OPTIMISTIC_LOCKING_RETRY = "optimisticLockingRetry";
+
+  private final ClientCommandRepository clientCommandRepository;
+  private final ClientQueryRepository clientQueryRepository;
+
+  private final ClientDomainService clientDomainService;
+  private final EncryptionService encryptionService;
+
+  private final AuthorizationMessagePublisher<ClientRemovedEvent> clientMessagePublisher;
+  private final ClientDataMapper clientDataMapper;
+  private final RetryExecutor retryExecutor;
+
+  /**
+   * Regenerates and encrypts the client secret.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param command the command containing client and tenant information
+   * @return the updated client secret response
+   */
+  public ClientSecretResponse regenerateSecret(
+      Audit audit, Role role, RegenerateTenantClientSecretCommand command) {
+    return retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Regenerating client secret");
+
+          var client = getClient(audit, role, command.getClientId(), command.getTenantId());
+          var event = clientDomainService.regenerateClientSecret(audit, client);
+          var clientSecret = client.getSecret().value();
+          client.encryptSecret(encryptionService::encrypt);
+
+          MDC.put("client_secret", client.getSecret().value());
+          log.debug("Generated a new secret");
+          MDC.remove("client_secret");
+
+          var response =
+              clientDataMapper.toClientSecret(clientCommandRepository.updateClient(event, client));
+          response.setClientSecret(clientSecret);
+          return response;
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not regenerate secret for client %s due to concurrent access",
+                    command.getClientId())));
+  }
+
+  /**
+   * Changes the visibility of a client.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param command the command containing client, tenant, and desired visibility status
+   */
+  public void changeVisibility(
+      Audit audit, Role role, ChangeTenantClientVisibilityCommand command) {
+    retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Trying to change client visibility");
+
+          var client = getClient(audit, role, command.getClientId(), command.getTenantId());
+          if (command.isPublic()) {
+            log.info("Changing client visibility to public");
+            var event = clientDomainService.makeClientPublic(audit, client);
+            clientCommandRepository.changeVisibilityByTenantIdAndClientId(
+                event, client.getClientTenantInfo().tenantId(), client.getId(), command.isPublic());
+          } else {
+            log.info("Changing client visibility to private");
+            var event = clientDomainService.makeClientPrivate(audit, client);
+            clientCommandRepository.changeVisibilityByTenantIdAndClientId(
+                event, client.getClientTenantInfo().tenantId(), client.getId(), command.isPublic());
+          }
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not change visibility for client %s due to concurrent access",
+                    command.getClientId())));
+  }
+
+  /**
+   * Changes the activation status of a client.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param command the command containing client, tenant, and desired activation status
+   */
+  public void changeActivation(
+      Audit audit, Role role, ChangeTenantClientActivationCommand command) {
+    retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Trying to change client activation");
+
+          var client = getClient(audit, role, command.getClientId(), command.getTenantId());
+          if (command.isEnabled()) {
+            log.info("Changing client activation to enabled");
+            var event = clientDomainService.enableClient(audit, client);
+            clientCommandRepository.changeActivationByTenantIdAndClientId(
+                event,
+                client.getClientTenantInfo().tenantId(),
+                client.getId(),
+                command.isEnabled());
+          } else {
+            log.info("Changing client activation to disabled");
+            var event = clientDomainService.disableClient(audit, client);
+            clientCommandRepository.changeActivationByTenantIdAndClientId(
+                event,
+                client.getClientTenantInfo().tenantId(),
+                client.getId(),
+                command.isEnabled());
+          }
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not change activation for client %s due to concurrent access",
+                    command.getClientId())));
+  }
+
+  /**
+   * Updates client information.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param command the command containing updated client information
+   * @return the updated client response
+   */
+  public ClientResponse updateClient(Audit audit, Role role, UpdateTenantClientCommand command) {
+    return retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Updating client information");
+
+          var client = getClient(audit, role, command.getClientId(), command.getTenantId());
+          clientDomainService.updateClientInfo(
+              audit,
+              client,
+              new ClientInfo(command.getName(), command.getDescription(), command.getLogo()));
+
+          var event =
+              clientDomainService.updateClientRedirectInfo(
+                  audit,
+                  client,
+                  new ClientRedirectInfo(
+                      client.getClientRedirectInfo().redirectUris(),
+                      command.getAllowedOrigins(),
+                      client.getClientRedirectInfo().logoutRedirectUris()));
+
+          if (command.isAllowPkce()) {
+            clientDomainService.addAuthenticationMethod(
+                audit, client, AuthenticationMethod.PKCE_AUTHENTICATION);
+            clientDomainService.addAuthenticationMethod(
+                audit, client, AuthenticationMethod.DEFAULT_AUTHENTICATION);
+          } else {
+            clientDomainService.addAuthenticationMethod(
+                audit, client, AuthenticationMethod.DEFAULT_AUTHENTICATION);
+            clientDomainService.removeAuthenticationMethod(
+                audit, client, AuthenticationMethod.PKCE_AUTHENTICATION);
+          }
+
+          if (command.isPublic()) clientDomainService.makeClientPublic(audit, client);
+          else clientDomainService.makeClientPrivate(audit, client);
+          return clientDataMapper.toClientResponse(
+              clientCommandRepository.updateClient(event, client));
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not update client %s due to concurrent access", command.getClientId())));
+  }
+
+  /**
+   * Deletes a client.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param command the command containing client and tenant information
+   * @return the result of the delete operation, the number of rows affected.
+   */
+  public int deleteClient(Audit audit, Role role, DeleteTenantClientCommand command) {
+    return retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Trying to remove client");
+
+          var client = getClient(audit, role, command.getClientId(), command.getTenantId());
+          var event = clientDomainService.deleteClient(audit, client);
+          // TODO: Move it later to core application service. Now we depend on getClient check
+          clientMessagePublisher.publish(
+              ClientRemovedEvent.builder().clientId(command.getClientId()).build());
+          return clientCommandRepository.deleteByTenantIdAndClientId(
+              event, client.getClientTenantInfo().tenantId(), client.getId());
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not delete client %s due to concurrent access", command.getClientId())));
+  }
+
+  /**
+   * Deletes all clients associated with a specific user and tenant.
+   *
+   * <p>This method removes all client entities created by the specified user within the given
+   * tenant. It employs retry logic with exponential backoff for handling optimistic locking
+   * failures.
+   *
+   * @param command the command containing user and tenant information
+   * @return the number of clients deleted
+   */
+  public int deleteUserClients(DeleteUserClientsCommand command) {
+    return retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Trying to remove user clients");
+          return clientCommandRepository.deleteAllByTenantIdAndCreatedBy(
+              new TenantId(command.getTenantId()), new UserId(command.getUserId()));
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not delete user %s clients due to concurrent access",
+                    command.getUserId())));
+  }
+
+  /**
+   * Deletes all clients associated with a specific tenant.
+   *
+   * <p>This method removes all client entities belonging to the specified tenant. It employs retry
+   * logic with exponential backoff for handling optimistic locking failures.
+   *
+   * @param tenantId the tenant identifier
+   * @return the number of clients deleted
+   */
+  public int deleteTenantClients(long tenantId) {
+    return retryExecutor.executeWithRetry(
+        OPTIMISTIC_LOCKING_RETRY,
+        () -> {
+          log.info("Trying to remove tenant clients");
+          return clientCommandRepository.deleteAllByTenantId(new TenantId(tenantId));
+        },
+        OptimisticLockingException.class,
+        () ->
+            new ClientDomainException(
+                String.format(
+                    "Could not delete tenant %d clients due to concurrent access", tenantId)));
+  }
+
+  /**
+   * Retrieves a client based on audit, role, client ID, and tenant ID.
+   *
+   * @param audit the audit details
+   * @param role the role of the requester
+   * @param clientId the client ID (UUID string)
+   * @param tenantId the tenant identifier
+   * @return the found client
+   * @throws ClientNotFoundException if no client is found
+   */
+  private Client getClient(Audit audit, Role role, String clientId, long tenantId) {
+    try {
+      var cid = new ClientId(UUID.fromString(clientId));
+      var tid = new TenantId(tenantId);
+      if (role.equals(Role.ROLE_ADMIN))
+        return clientQueryRepository
+            .findByClientIdAndTenantId(cid, tid)
+            .orElseThrow(
+                () ->
+                    new ClientNotFoundException(
+                        String.format(
+                            "Client with id %s for tenant %d was not found", clientId, tenantId)));
+      else if (role.equals(Role.ROLE_USER))
+        return clientQueryRepository
+            .findByClientIdAndTenantIdAndCreatorId(cid, tid, new UserId(audit.getUserId()))
+            .orElseThrow(
+                () ->
+                    new ClientNotFoundException(
+                        String.format(
+                            "Client with id %s for tenant %d and user %s was not found",
+                            clientId, tenantId, audit.getUserEmail())));
+      throw new ClientNotFoundException(
+          String.format(
+              "Client with id %s for tenant %d and user %s was not found",
+              clientId, tenantId, audit.getUserId()));
+    } catch (IllegalArgumentException e) {
+      throw new ClientNotFoundException(
+          String.format("Client with id %s was not found. Invalid client id format", clientId));
+    }
+  }
+}

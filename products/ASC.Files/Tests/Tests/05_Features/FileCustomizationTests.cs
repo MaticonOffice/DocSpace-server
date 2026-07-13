@@ -1,0 +1,125 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Tests.Tests._05_Features;
+
+[Collection("Test Collection")]
+[Trait("Category", "Features")]
+public class FileCustomizationTests(
+    AspireAppFixture fixture)
+    : BaseTest(fixture)
+{
+    [Fact]
+    public async Task SetCustomFilterTag_InMy_ReturnsError()
+    {
+        // Arrange
+        await _filesClient.Authenticate(Initializer.Owner);
+        
+        var file = await CreateFileInMy("file_for_custom_filter.xlsx",  Initializer.Owner);
+        
+        // Act
+        var customFilterParams = new CustomFilterParameters(enabled: true);
+        var result = (await _filesApi.SetCustomFilterTagAsync(file.Id, customFilterParams, TestContext.Current.CancellationToken)).Response;
+        
+        // Assert
+        result.Should().NotBeNull();
+        result.Id.Should().Be(file.Id);
+        result.CustomFilterEnabled.Should().BeTrue();
+    }
+    
+    [Fact]
+    public async Task SetCustomFilterTag_EnableCustomFilter_ReturnsUpdatedFile()
+    {
+        // Arrange
+        await _filesClient.Authenticate(Initializer.Owner);
+        
+        var createdRoom = await CreateVirtualRoom("room_for_custom_filter"); 
+        var file = await CreateFile("file_for_custom_filter.xlsx", createdRoom.Id);
+        
+        // Act
+        var customFilterParams = new CustomFilterParameters(enabled: true);
+        var result = (await _filesApi.SetCustomFilterTagAsync(file.Id, customFilterParams, TestContext.Current.CancellationToken)).Response;
+        
+        // Assert
+        result.Should().NotBeNull();
+        result.Id.Should().Be(file.Id);
+        result.CustomFilterEnabled.Should().BeTrue();
+        //result.CustomFilterEnabledBy.Should().NotBeNullOrEmpty(); // Should contain user ID who enabled it
+    }
+    
+    [Fact]
+    public async Task SetCustomFilterTag_DisableCustomFilter_ReturnsUpdatedFile()
+    {
+        // Arrange
+        await _filesClient.Authenticate(Initializer.Owner);
+        
+        var createdRoom = await CreateVirtualRoom("room_for_custom_filter"); 
+        var file = await CreateFile("file_for_custom_filter_disable.xlsx", createdRoom.Id);
+        
+        // First enable custom filter
+        var enableParams = new CustomFilterParameters(enabled: true);
+        await _filesApi.SetCustomFilterTagAsync(file.Id, enableParams, TestContext.Current.CancellationToken);
+        
+        // Then disable it
+        var disableParams = new CustomFilterParameters(enabled: false);
+        var result = (await _filesApi.SetCustomFilterTagAsync(file.Id, disableParams, TestContext.Current.CancellationToken)).Response;
+        
+        // Assert
+        result.Should().NotBeNull();
+        result.Id.Should().Be(file.Id);
+        result.CustomFilterEnabled.Should().BeNull();
+    }
+    
+    // [Fact]
+    // public async Task CreateThumbnails_ValidFile_ReturnsSuccess()
+    // {
+    //     // Arrange
+    //     await _filesClient.Authenticate(Initializer.Owner);
+    //     
+    //     var file = await CreateFile("file_for_thumbnail.docx", FolderType.USER, Initializer.Owner);
+    //     
+    //     // Act
+    //     var thumbnailRequest = new BaseBatchRequestDto(fileIds: [new(file.Id)]);
+    //     var result = (await _filesFilesApi.CreateThumbnailsAsync(thumbnailRequest, TestContext.Current.CancellationToken)).Response;
+    //     
+    //     // Assert
+    //     result.Should().NotBeNull();
+    //     result.Should().Contain(id => id == file.Id);
+    //     
+    //     // Get the file to check thumbnail status
+    //     var updatedFile = await GetFile(file.Id);
+    //     
+    //     // The thumbnail might not be immediately created but the process should have started
+    //     // Adjust this assertion based on actual behavior
+    // }
+}

@@ -1,0 +1,459 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
+namespace ASC.Common;
+
+public enum DIAttributeType
+{
+    Singleton,
+    Scope,
+    Transient
+}
+
+public class TransientAttribute : DIAttribute
+{
+    public override DIAttributeType DiAttributeType => DIAttributeType.Transient;
+
+    public TransientAttribute() { }
+
+    public TransientAttribute(Type service) : base(service) { }
+
+    public TransientAttribute(Type service, Type implementation) : base(service, implementation) { }
+
+    public override void TryAdd(IServiceCollection services, Type service, Type implementation = null)
+    {
+        if (implementation != null)
+        {
+            services.AddTransient(service, implementation);
+        }
+        else
+        {
+            services.AddTransient(service);
+        }
+    }
+}
+
+public class ScopeAttribute : DIAttribute
+{
+    public override DIAttributeType DiAttributeType => DIAttributeType.Scope;
+
+    public ScopeAttribute() { }
+
+    public ScopeAttribute(Type service) : base(service) { }
+
+    public ScopeAttribute(Type service, Type implementation) : base(service, implementation) { }
+
+    public override void TryAdd(IServiceCollection services, Type service, Type implementation = null)
+    {
+        if (implementation != null)
+        {
+            services.AddScoped(service, implementation);
+        }
+        else
+        {
+            services.AddScoped(service);
+        }
+    }
+}
+
+public class SingletonAttribute : DIAttribute
+{
+    public override DIAttributeType DiAttributeType => DIAttributeType.Singleton;
+
+    public SingletonAttribute() { }
+
+    public SingletonAttribute(Type service) : base(service) { }
+
+    public SingletonAttribute(Type service, Type implementation) : base(service, implementation) { }
+
+    public override void TryAdd(IServiceCollection services, Type service, Type implementation = null)
+    {
+        if (implementation != null)
+        {
+            services.AddSingleton(service, implementation);
+        }
+        else
+        {
+            services.AddSingleton(service);
+        }
+    }
+}
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface, AllowMultiple = true)]
+public abstract class DIAttribute : Attribute
+{
+    public abstract DIAttributeType DiAttributeType { get; }
+    protected internal Type Implementation { get; }
+    protected internal Type Service { get; }
+
+    public Type[] GenericArguments { get; init; }
+
+    protected DIAttribute() { }
+
+    protected DIAttribute(Type service)
+    {
+        Service = service;
+    }
+
+    protected DIAttribute(Type service, Type implementation)
+    {
+        Implementation = implementation;
+        Service = service;
+    }
+
+    public abstract void TryAdd(IServiceCollection services, Type service, Type implementation = null);
+}
+
+public class DIHelper
+{
+    private readonly Dictionary<DIAttributeType, HashSet<(Type, Type)>> _services = new()
+    {
+        { DIAttributeType.Singleton, [] },
+        { DIAttributeType.Scope, [] },
+        { DIAttributeType.Transient, [] }
+    };
+    private readonly HashSet<(Type Service, Type Implementation)> _added = [];
+    private readonly Dictionary<Type, DIAttribute[]> _attributeCache = [];
+    private readonly Lock _scanLock = new();
+    private IServiceCollection _serviceCollection;
+
+    private static readonly MethodInfo _registerDistributedTaskMethod =
+        typeof(DIHelper).GetMethod(nameof(RegisterDistributedTask))!;
+
+    private readonly HashSet<string> _visited = [];
+
+    public void Scan()
+    {
+        AppDomain.CurrentDomain.AssemblyLoad += (_, args) =>
+        {
+            Scan(args.LoadedAssembly);
+        };
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies().OrderBy(r => r.FullName))
+        {
+            Scan(assembly);
+        }
+    }
+
+    private void Scan(Assembly assembly)
+    {
+        lock (_scanLock)
+        {
+            var assemblyName = assembly.GetName();
+            if (!CheckAssemblyName(assemblyName) || _visited.Contains(assemblyName.FullName))
+            {
+                return;
+            }
+
+            _visited.Add(assembly.FullName);
+
+            var types = assembly.GetTypes().Where(t => GetDiAttributes(t).Length > 0);
+
+            foreach (var a in types)
+            {
+                TryAdd(a);
+            }
+
+            var references = assembly.GetReferencedAssemblies();
+            foreach (var reference in references.Where(r => CheckAssemblyName(r) && !_visited.Contains(r.FullName)))
+            {
+                Assembly.Load(reference);
+            }
+        }
+    }
+
+    private bool CheckAssemblyName(AssemblyName assembly)
+    {
+        var assemblyName = assembly.Name;
+        return assemblyName != null && assemblyName.StartsWith("ASC.");
+    }
+
+    private void TryAdd(Type service, Type implementation = null, DIAttribute di = null)
+    {
+        Type serviceGenericTypeDefinition = null;
+
+        if (service.IsGenericType)
+        {
+            serviceGenericTypeDefinition = service.GetGenericTypeDefinition();
+        }
+
+        if (serviceGenericTypeDefinition != null)
+        {
+            if (service.IsInterface && implementation == null &&
+                (
+                    serviceGenericTypeDefinition == typeof(IOptionsSnapshot<>) ||
+                    serviceGenericTypeDefinition == typeof(IOptions<>) ||
+                    serviceGenericTypeDefinition == typeof(IOptionsMonitor<>)
+                ))
+            {
+                service = service.GetGenericArguments().FirstOrDefault();
+
+                if (service == null)
+                {
+                    return;
+                }
+            }
+            else if (service.IsGenericTypeDefinition)
+            {
+                var attributes = GetDiAttributes(service);
+                foreach (var attr in attributes)
+                {
+                    if (attr.GenericArguments == null || attr.GenericArguments.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    TryAdd(service.MakeGenericType(attr.GenericArguments), di: attr);
+                }
+                return;
+            }
+        }
+
+        if (!_added.Add((service, implementation)))
+        {
+            return;
+        }
+
+        di ??= serviceGenericTypeDefinition != null && (
+            serviceGenericTypeDefinition == typeof(IConfigureOptions<>) ||
+            serviceGenericTypeDefinition == typeof(IPostConfigureOptions<>) ||
+            serviceGenericTypeDefinition == typeof(IOptionsMonitor<>)
+            ) && implementation != null ?
+            GetDiAttributes(implementation).FirstOrDefault() :
+            GetDiAttributes(service).FirstOrDefault();
+
+        if (!service.IsInterface || implementation != null)
+        {
+            var isnew = implementation != null ? Register(di, service, implementation) : Register(di, service);
+            if (!isnew)
+            {
+                return;
+            }
+        }
+
+        if (service.IsInterface && implementation == null || !service.IsInterface)
+        {
+            if (di.Service != null)
+            {
+                var a = di.Service.GetInterfaces().FirstOrDefault(x =>
+                {
+                    Type xGenericTypeDefinition = null;
+
+                    if (x.IsGenericType)
+                    {
+                        xGenericTypeDefinition = x.GetGenericTypeDefinition();
+                    }
+
+                    return
+                    xGenericTypeDefinition != null && (
+                    xGenericTypeDefinition == typeof(IConfigureOptions<>) ||
+                    xGenericTypeDefinition == typeof(IPostConfigureOptions<>) ||
+                    xGenericTypeDefinition == typeof(IOptionsMonitor<>));
+                });
+
+                if (a != null)
+                {
+                    if (!a.ContainsGenericParameters)
+                    {
+                        var b = a.GetGenericArguments();
+
+                        foreach (var g in b)
+                        {
+                            if (g != service)
+                            {
+                                TryAdd(g);
+
+                                if (service.IsInterface && di.Implementation == null)
+                                {
+                                    TryAdd(service, g);
+                                }
+                            }
+                        }
+
+                        TryAdd(a, di.Service);
+                    }
+                    else
+                    {
+                        Type c;
+                        var a1 = a.GetGenericTypeDefinition();
+                        var b = a.GetGenericArguments().FirstOrDefault();
+
+                        if (b is { IsGenericType: true })
+                        {
+                            var b1 = b.GetGenericTypeDefinition().MakeGenericType(service.GetGenericArguments());
+
+                            TryAdd(b1);
+                            c = a1.MakeGenericType(b1);
+                        }
+                        else
+                        {
+                            c = a1.MakeGenericType(service.GetGenericArguments());
+                        }
+
+                        TryAdd(c, di.Service.MakeGenericType(service.GetGenericArguments()));
+                        //a, di.Service
+                    }
+                }
+                else
+                {
+                    if (di.Implementation == null)
+                    {
+                        Register(di, di.Service, service);
+                        TryAdd(service);
+                    }
+                    else
+                    {
+                        Register(di, di.Service, di.Implementation);
+                        Register(di, service);
+                    }
+                }
+            }
+
+            if (di.Implementation != null)
+            {
+                var a = di.Implementation.GetInterfaces().FirstOrDefault(x =>
+                {
+
+                    Type xGenericTypeDefinition = null;
+
+                    if (x.IsGenericType)
+                    {
+                        xGenericTypeDefinition = x.GetGenericTypeDefinition();
+                    }
+
+                    return
+                    xGenericTypeDefinition != null &&
+                    (
+                    xGenericTypeDefinition == typeof(IConfigureOptions<>) ||
+                    xGenericTypeDefinition == typeof(IPostConfigureOptions<>) ||
+                    xGenericTypeDefinition == typeof(IOptionsMonitor<>));
+                });
+
+                if (a != null)
+                {
+                    if (!a.ContainsGenericParameters)
+                    {
+                        var b = a.GetGenericArguments();
+
+                        foreach (var g in b)
+                        {
+                            if (g != service)
+                            {
+                                //TryAdd(g);
+                                if (service.IsInterface && implementation == null)
+                                {
+                                    TryAdd(service, g);
+                                }
+                            }
+                        }
+
+                        TryAdd(a, di.Implementation);
+                    }
+                    else
+                    {
+                        Type c;
+                        var a1 = a.GetGenericTypeDefinition();
+                        var b = a.GetGenericArguments().FirstOrDefault();
+
+                        if (b is { IsGenericType: true })
+                        {
+                            var b1 = b.GetGenericTypeDefinition().MakeGenericType(service.GetGenericArguments());
+
+                            TryAdd(b1);
+                            c = a1.MakeGenericType(b1);
+                        }
+                        else
+                        {
+                            c = a1.MakeGenericType(service.GetGenericArguments());
+                        }
+
+                        TryAdd(c, di.Implementation.MakeGenericType(service.GetGenericArguments()));
+                        //a, di.Service
+                    }
+                }
+            }
+        }
+
+    }
+
+    public void Configure(IServiceCollection serviceCollection)
+    {
+        _serviceCollection = serviceCollection;
+    }
+
+    private bool Register(DIAttribute c, Type service, Type implementation = null)
+    {
+        var interfaces = service.GetInterfaces();
+        if (service.IsSubclassOf(typeof(ControllerBase)) ||
+            Array.IndexOf(interfaces, typeof(IResourceFilter)) >= 0 ||
+            Array.IndexOf(interfaces, typeof(IDictionary<string, string>)) >= 0)
+        {
+            return true;
+        }
+
+        if (!_services[c.DiAttributeType].Add((service, implementation)))
+        {
+            return false;
+        }
+
+        if (service.IsSubclassOf(typeof(DistributedTask)))
+        {
+            var fooRef = _registerDistributedTaskMethod.MakeGenericMethod(service);
+            fooRef.Invoke(this, null);
+        }
+
+        c.TryAdd(_serviceCollection, service, implementation);
+
+        return true;
+    }
+
+    public void RegisterDistributedTask<T>() where T : DistributedTask
+    {
+        _serviceCollection.TryAddSingleton(Channel.CreateUnbounded<T>());
+        _serviceCollection.TryAddSingleton(svc => svc.GetRequiredService<Channel<T>>().Writer);
+        _serviceCollection.TryAddTransient<DistributedTaskQueue<T>>();
+    }
+
+    private DIAttribute[] GetDiAttributes(Type type)
+    {
+        if (!_attributeCache.TryGetValue(type, out var attrs))
+        {
+            attrs = type.GetCustomAttributes<DIAttribute>().ToArray();
+            _attributeCache[type] = attrs;
+        }
+
+        return attrs;
+    }
+}

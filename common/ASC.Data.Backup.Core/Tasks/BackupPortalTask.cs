@@ -1,0 +1,777 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Newtonsoft.Json;
+
+namespace ASC.Data.Backup.Tasks;
+
+[Scope]
+public partial class BackupPortalTask(
+    DbFactory dbFactory,
+    IDbContextFactory<BackupsContext> dbContextFactory,
+    ILogger<BackupPortalTask> logger,
+    TenantManager tenantManager,
+    CoreBaseSettings coreBaseSettings,
+    StorageFactory storageFactory,
+    IDaoFactory daoFactory,
+    IQuotaService quotaService,
+    StorageFactoryConfig storageFactoryConfig,
+    ModuleProvider moduleProvider,
+    TempStream tempStream)
+    : PortalTaskBase(dbFactory, logger, storageFactory, storageFactoryConfig, moduleProvider)
+{
+    private string BackupFilePath { get; set; }
+    private int Limit { get; set; }
+
+    private const int MaxLength = 250;
+    private const int BatchLimit = 5000;
+
+    private bool _dump = coreBaseSettings.Standalone;
+
+    private string _missingFilesInfo;
+
+    public void Init(int tenantId, string toFilePath, int limit, IDataWriteOperator writeOperator, bool dump)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(toFilePath);
+
+        BackupFilePath = toFilePath;
+        Limit = limit;
+        WriteOperator = writeOperator;
+        _dump = dump;
+
+        Init(tenantId);
+    }
+
+    public override async Task RunJob()
+    {
+        logger.DebugBeginBackup(TenantId);
+
+        await using (WriteOperator)
+        {
+            if (_dump)
+            {
+                await DoDump(WriteOperator);
+            }
+            else
+            {
+                var modulesToProcess = GetModulesToProcess().ToList();
+                SetStepsCount(1);
+                var count = modulesToProcess.Select(m => m.Tables.Count(t => !_ignoredTables.Contains(t.Name) && t.InsertMethod != InsertMethod.None)).Sum();
+                List<BackupFileInfo> files = null;
+                if (ProcessStorage)
+                {
+                    files = await GetFiles();
+                    count += files.Count;
+                }
+
+                var completedCount = 0;
+
+                async Task SetProgress()
+                {
+                    await SetCurrentStepProgress((int)(++completedCount * 100 / (double)count));
+                }
+
+                await DoBackupModule(WriteOperator, modulesToProcess, SetProgress);
+
+                if (ProcessStorage)
+                {
+                    await DoBackupStorageAsync(WriteOperator, files, SetProgress);
+                }
+            }
+        }
+
+        logger.DebugEndBackup(TenantId);
+    }
+
+    public string GetMissingFilesInfo() => _missingFilesInfo;
+
+    private List<object[]> ExecuteList(DbCommand command)
+    {
+        var list = new List<object[]>();
+        using var result = command.ExecuteReader();
+        while (result.Read())
+        {
+            var objects = new object[result.FieldCount];
+            result.GetValues(objects);
+            list.Add(objects);
+        }
+
+        return list;
+    }
+
+    private async Task DoDump(IDataWriteOperator writer)
+    {
+        var databases = new Dictionary<Tuple<string, string>, List<string>>();
+
+        await using (var connection = DbFactory.OpenConnection())
+        {
+            var command = connection.CreateCommand();
+            command.CommandText = "show tables";
+            var tables = ExecuteList(command).Select(r => Convert.ToString(r[0])).ToList();
+            databases.Add(new Tuple<string, string>("default", DbFactory.ConnectionStringSettings()), tables);
+        }
+
+        using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(true.ToString())))
+        {
+            await writer.WriteEntryAsync(KeyHelper.GetDumpKey(), stream, () => Task.CompletedTask);
+        }
+
+        List<BackupFileInfo> files = null;
+
+        var count = databases.Select(d => d.Value.Count * 4).Sum(); // (schema + data) * (dump + zip)
+        var completedCount = count;
+
+        if (ProcessStorage)
+        {
+            var tenants = (await tenantManager.GetTenantsAsync(false)).Select(r => r.Id);
+            files = await GetFilesTenants(tenants);
+            logger.DebugFilesCount(count);
+            count += files.Count;
+        }
+        SetStepsCount(1);
+
+        foreach (var db in databases)
+        {
+            await DoDump(writer, db.Key.Item1, db.Key.Item2, db.Value);
+        }
+
+        var dir = Path.GetDirectoryName(BackupFilePath);
+        var subDir = Path.Combine(dir, Path.GetFileNameWithoutExtension(BackupFilePath));
+        logger.DebugDirRemoveStart(subDir);
+        Directory.Delete(subDir, true);
+        logger.DebugDirRemoveEnd(subDir);
+
+        if (ProcessStorage)
+        {
+            await DoBackupStorageAsync(writer, files, SetProgress, true);
+        }
+
+        async Task SetProgress()
+        {
+            await SetCurrentStepProgress((int)(++completedCount * 100 / (double)count));
+        }
+    }
+
+    private async Task DoDump(IDataWriteOperator writer, string dbName, string connectionString, List<string> tables)
+    {
+        var excluded = ModuleProvider.AllModules.Where(r => _ignoredModules.Contains(r.ModuleName)).SelectMany(r => r.Tables).Select(r => r.Name).ToList();
+        excluded.AddRange(_ignoredTables);
+        excluded.Add("res_");
+
+        var dir = Path.GetDirectoryName(BackupFilePath);
+        var subDir = CrossPlatform.PathCombine(dir, Path.GetFileNameWithoutExtension(BackupFilePath));
+        string schemeDir;
+        string dataDir;
+        if (dbName == "default")
+        {
+            schemeDir = Path.Combine(subDir, KeyHelper.GetDatabaseSchema());
+            dataDir = Path.Combine(subDir, KeyHelper.GetDatabaseData());
+        }
+        else
+        {
+            schemeDir = Path.Combine(subDir, dbName, KeyHelper.GetDatabaseSchema());
+            dataDir = Path.Combine(subDir, dbName, KeyHelper.GetDatabaseData());
+        }
+
+        if (!Directory.Exists(schemeDir))
+        {
+            Directory.CreateDirectory(schemeDir);
+        }
+
+        if (!Directory.Exists(dataDir))
+        {
+            Directory.CreateDirectory(dataDir);
+        }
+
+        var dict = new Dictionary<string, int>();
+        foreach (var table in tables)
+        {
+            dict.Add(table, SelectCount(table, connectionString));
+        }
+
+        tables.Sort((pair1, pair2) => dict[pair1].CompareTo(dict[pair2]));
+
+        for (var i = 0; i < tables.Count; i += TasksLimit)
+        {
+            var tasks = new List<Task>(TasksLimit * 2);
+            for (var j = 0; j < TasksLimit && i + j < tables.Count; j++)
+            {
+                var t = tables[i + j];
+                var ignore = excluded.Exists(t.StartsWith);
+                tasks.Add(Task.Run(async () => await DumpTableScheme(t, schemeDir, connectionString, ignore)));
+                if (!ignore)
+                {
+                    tasks.Add(Task.Run(async () => await DumpTableData(t, dataDir, dict[t], connectionString)));
+                }
+                else
+                {
+                    await SetStepCompleted(2);
+                }
+            }
+
+            Task.WaitAll(tasks.ToArray());
+
+            await ArchiveDir(writer, subDir);
+        }
+    }
+
+    private async Task DumpTableScheme(string t, string dir, string connectionString, bool ignore)
+    {
+        try
+        {
+            logger.DebugDumpTableSchemeStart(t);
+            await using (var connection = DbFactory.OpenConnection(connectionString: connectionString))
+            {
+                var command = connection.CreateCommand();
+                command.CommandText = $"SHOW CREATE TABLE `{t}`";
+                var createScheme = ExecuteList(command);
+                var creates = new StringBuilder();
+                if (ignore)
+                {
+                    creates.Append(createScheme
+                        .Select(r => Convert.ToString(r[1]).Replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "))
+                        .FirstOrDefault());
+                }
+                else
+                {
+                    creates.Append($"DROP TABLE IF EXISTS `{t}`;");
+                    creates.AppendLine();
+                    creates.Append(createScheme
+                        .Select(r => Convert.ToString(r[1]))
+                        .FirstOrDefault());
+                }
+
+                creates.Append(';');
+
+                var path = CrossPlatform.PathCombine(dir, t);
+                await using (var stream = File.OpenWrite(path))
+                {
+                    var bytes = Encoding.UTF8.GetBytes(creates.ToString());
+                    await stream.WriteAsync(bytes);
+                }
+
+                await SetStepCompleted();
+            }
+
+            logger.DebugDumpTableSchemeStop(t);
+        }
+        catch (Exception e)
+        {
+            logger.ErrorDumpTableScheme(e);
+        }
+    }
+
+    private int SelectCount(string t, string dbName)
+    {
+        try
+        {
+            using var connection = DbFactory.OpenConnection(connectionString: dbName);
+            using var analyzeCommand = connection.CreateCommand();
+            analyzeCommand.CommandText = $"analyze table {t}";
+            analyzeCommand.ExecuteNonQuery();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"select TABLE_ROWS from INFORMATION_SCHEMA.TABLES where TABLE_NAME = '{t}' and TABLE_SCHEMA = '{connection.Database}'";
+
+            return int.Parse(command.ExecuteScalar().ToString());
+        }
+        catch (Exception e)
+        {
+            logger.ErrorSelectCount(e);
+            throw;
+        }
+    }
+
+    private async Task DumpTableData(string t, string dir, int count, string connectionString)
+    {
+        try
+        {
+            if (count == 0)
+            {
+                logger.DebugDumpTableDataStop(t);
+                await SetStepCompleted(2);
+
+                return;
+            }
+
+            logger.DebugDumpTableDataStart(t);
+            bool searchWithPrimary;
+            string primaryIndex;
+            var primaryIndexStep = 0;
+            var primaryIndexStart = 0;
+
+            List<string> columns;
+
+            await using (var connection = DbFactory.OpenConnection(connectionString: connectionString))
+            {
+                var command = connection.CreateCommand();
+                command.CommandText = $"SHOW COLUMNS FROM `{t}`";
+                columns = ExecuteList(command)
+                    .Where(r => !Convert.ToString(r[5]).Contains("GENERATED", StringComparison.OrdinalIgnoreCase))
+                    .Select(r => "`" + Convert.ToString(r[0]) + "`")
+                    .ToList();
+            }
+
+            await using (var connection = DbFactory.OpenConnection())
+            {
+                var command = connection.CreateCommand();
+                command.CommandText = $"select COLUMN_NAME from information_schema.`COLUMNS` where TABLE_SCHEMA = '{connection.Database}' and TABLE_NAME = '{t}' and COLUMN_KEY = 'PRI' and DATA_TYPE = 'int'";
+                primaryIndex = ExecuteList(command).ConvertAll(r => Convert.ToString(r[0])).FirstOrDefault();
+            }
+
+            await using (var connection = DbFactory.OpenConnection())
+            {
+                var command = connection.CreateCommand();
+                command.CommandText = $"SHOW INDEXES FROM {t} WHERE COLUMN_NAME='{primaryIndex}' AND seq_in_index=1";
+                var isLeft = ExecuteList(command);
+                searchWithPrimary = isLeft.Count == 1;
+            }
+
+            if (searchWithPrimary)
+            {
+                await using var connection = DbFactory.OpenConnection();
+                var command = connection.CreateCommand();
+                command.CommandText = $"select max({primaryIndex}), min({primaryIndex}) from {t}";
+                var minMax = ExecuteList(command).ConvertAll(r => new Tuple<int, int>(Convert.ToInt32(r[0]), Convert.ToInt32(r[1]))).FirstOrDefault();
+                primaryIndexStart = minMax.Item2;
+                primaryIndexStep = (minMax.Item1 - minMax.Item2) / count;
+
+                if (primaryIndexStep < Limit)
+                {
+                    primaryIndexStep = Limit;
+                }
+            }
+
+            var path = CrossPlatform.PathCombine(dir, t);
+
+            var offset = 0;
+
+            do
+            {
+                List<object[]> result;
+
+                if (searchWithPrimary)
+                {
+                    result = GetDataWithPrimary(t, columns, primaryIndex, primaryIndexStart, primaryIndexStep, connectionString);
+                    primaryIndexStart += primaryIndexStep;
+                }
+                else
+                {
+                    result = GetData(t, columns, offset, connectionString);
+                }
+
+                offset += Limit;
+
+                var resultCount = result.Count;
+
+                if (resultCount == 0)
+                {
+                    break;
+                }
+
+                SaveToFile(path, t, columns, result);
+            } while (true);
+
+
+            await SetStepCompleted();
+            logger.DebugDumpTableDataStop(t);
+        }
+        catch (Exception e)
+        {
+            logger.ErrorDumpTableData(e);
+            throw;
+        }
+    }
+
+    private List<object[]> GetData(string t, IEnumerable<string> columns, int offset, string connectionString)
+    {
+        using var connection = DbFactory.OpenConnection(connectionString: connectionString);
+        var command = connection.CreateCommand();
+        var selects = string.Join(',', columns);
+        command.CommandText = $"select {selects} from {t} LIMIT {offset}, {Limit}";
+
+        return ExecuteList(command);
+    }
+
+    private List<object[]> GetDataWithPrimary(string t, IEnumerable<string> columns, string primary, int start, int step, string connectionString)
+    {
+        using var connection = DbFactory.OpenConnection(connectionString: connectionString);
+        var command = connection.CreateCommand();
+        var selects = string.Join(',', columns);
+        command.CommandText = $"select {selects} from {t} where {primary} BETWEEN  {start} and {start + step} ";
+
+        return ExecuteList(command);
+    }
+
+    private ConnectionStringSettings GetConnectionString(int id, string connectionString)
+    {
+        connectionString += ";convert zero datetime=True";
+        return new ConnectionStringSettings("mailservice-" + id, connectionString, "MySql.Data.MySqlClient");
+    }
+
+    private void SaveToFile(string path, string t, IReadOnlyCollection<string> columns, List<object[]> data)
+    {
+        logger.DebugSaveTable(t);
+        List<object[]> portion;
+        while ((portion = data.Take(BatchLimit).ToList()).Count > 0)
+        {
+            using (var sw = new StreamWriter(path, true))
+            using (var writer = new JsonTextWriter(sw))
+            {
+                writer.QuoteChar = '\'';
+                writer.DateFormatString = "yyyy-MM-dd HH:mm:ss";
+                sw.Write("REPLACE INTO `{0}` ({1}) VALUES ", t, string.Join(",", columns));
+                sw.WriteLine();
+
+                for (var j = 0; j < portion.Count; j++)
+                {
+                    var obj = portion[j];
+                    sw.Write("(");
+
+                    for (var i = 0; i < obj.Length; i++)
+                    {
+                        if (obj[i] is byte[] byteArray && byteArray.Length != 0)
+                        {
+                            sw.Write("0x");
+                            foreach (var b in byteArray)
+                            {
+                                sw.Write("{0:x2}", b);
+                            }
+                        }
+                        else
+                        {
+                            if (obj[i] is string s)
+                            {
+                                sw.Write("'" + s.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("'", "\\'").Replace("\n", "\\n") + "'");
+                            }
+                            else
+                            {
+                                var ser = new JsonSerializer();
+                                ser.Serialize(writer, obj[i]);
+                            }
+                        }
+
+                        if (i != obj.Length - 1)
+                        {
+                            sw.Write(",");
+                        }
+                    }
+
+                    sw.Write(")");
+
+                    sw.Write(j != portion.Count - 1 ? "," : ";");
+
+                    sw.WriteLine();
+                }
+            }
+
+            data = data.Skip(BatchLimit).ToList();
+        }
+    }
+
+    private async Task ArchiveDir(IDataWriteOperator writer, string subDir)
+    {
+        logger.DebugArchiveDirStart(subDir);
+        foreach (var enumerateFile in Directory.EnumerateFiles(subDir, "*", SearchOption.AllDirectories))
+        {
+            var f = enumerateFile;
+            if (!WorkContext.IsMono && enumerateFile.Length > MaxLength)
+            {
+                f = @"\\?\" + f;
+            }
+
+            await using var tmpFile = new FileStream(f, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 4096, FileOptions.DeleteOnClose);
+            await writer.WriteEntryAsync(enumerateFile[subDir.Length..], tmpFile, async () => await SetStepCompleted());
+        }
+
+        logger.DebugArchiveDirEnd(subDir);
+    }
+
+    private Task<List<BackupFileInfo>> GetFiles()
+    {
+        return GetFiles(TenantId);
+    }
+
+    private async Task<List<BackupFileInfo>> GetFilesTenants(IEnumerable<int> tenantIds)
+    {
+        var result = new List<BackupFileInfo>();
+        foreach (var tenantId in tenantIds)
+        {
+            result.AddRange(await GetFiles(tenantId));
+        }
+        return result;
+    }
+
+    private async Task<List<BackupFileInfo>> GetFiles(int tenantId)
+    {
+        var files = GetFilesToProcess(tenantId).Distinct();
+
+        await using var backupRecordContext = await dbContextFactory.CreateDbContextAsync();
+        var exclude = await Queries.BackupRecordsIncludingDumpAsync(backupRecordContext, tenantId).ToListAsync();
+
+        files = files.Where(f => !exclude.Exists(e => f.Path.Replace('\\', '/').Contains($"/file_{e.StoragePath}/")));
+        files = files.Where(f => !f.Path.Contains("/thumb."));
+
+        return await files.ToListAsync();
+    }
+
+    private async Task DoBackupModule(IDataWriteOperator writer, List<IModuleSpecifics> modules, Func<Task> progressAction)
+    {
+        var backupCorrection = await GetBackupCorrection(TenantId);
+
+        foreach (var module in modules)
+        {
+            logger.DebugBeginSavingDataForModule(module.ModuleName);
+            var tablesToProcess = module.Tables.Where(t => !_ignoredTables.Contains(t.Name) && t.InsertMethod != InsertMethod.None).ToList();
+
+            await using (var connection = DbFactory.OpenConnection())
+            {
+                foreach (var table in tablesToProcess)
+                {
+                    logger.DebugBeginLoadTable(table.Name);
+                    using var data = new DataTable(table.Name);
+                    ActionInvoker.Try(
+                        state =>
+                        {
+                            data.Clear();
+                            int counts;
+                            var offset = 0;
+                            do
+                            {
+                                var t = (TableInfo)state;
+                                var dataAdapter = DbFactory.CreateDataAdapter();
+                                dataAdapter.SelectCommand = module.CreateSelectCommand(connection.Fix(), TenantId, t, Limit, offset).WithTimeout(600);
+                                counts = ((DbDataAdapter)dataAdapter).Fill(data);
+                                offset += Limit;
+                            } while (counts == Limit);
+                        },
+                        table,
+                        maxAttempts: 5,
+                        onFailure: error => throw ThrowHelper.CantBackupTable(table.Name, error),
+                        onAttemptFailure: logger.WarningBackupAttemptFailure);
+
+                    foreach (var col in data.Columns.Cast<DataColumn>().Where(col => col.DataType == typeof(DateTime)))
+                    {
+                        col.DateTimeMode = DataSetDateTime.Unspecified;
+                    }
+
+                    module.PrepareData(data, backupCorrection);
+
+                    logger.DebugEndLoadTable(table.Name);
+
+                    logger.DebugBeginSavingTable(table.Name);
+
+                    await using (var file = tempStream.Create())
+                    {
+                        data.WriteXml(file, XmlWriteMode.WriteSchema);
+                        data.Clear();
+
+                        await writer.WriteEntryAsync(KeyHelper.GetTableZipKey(module, data.TableName), file, progressAction);
+                    }
+
+                    logger.DebugEndSavingTable(table.Name);
+                }
+            }
+
+            logger.DebugEndSavingDataForModule(module.ModuleName);
+        }
+    }
+
+    private async Task DoBackupStorageAsync(IDataWriteOperator writer, List<BackupFileInfo> files, Func<Task> progressAction, bool dump = false)
+    {
+        logger.DebugBeginBackupStorage();
+
+        await using var tmpFile = tempStream.Create();
+        var bytes = "<storage_restore>"u8.ToArray();
+        await tmpFile.WriteAsync(bytes);
+
+        await using var tmpErrorsFile = tempStream.Create();
+        bytes = "<storage_missing>"u8.ToArray();
+        await tmpErrorsFile.WriteAsync(bytes);
+        var hasMissingFiles = false;
+
+        var storages = new Dictionary<string, IDataStore>();
+
+        foreach (var file in files)
+        {
+            if (!storages.TryGetValue(file.Module + file.Tenant, out var storage))
+            {
+                storage = await StorageFactory.GetStorageAsync(file.Tenant, file.Module);
+                storages.Add(file.Module + file.Tenant, storage);
+            }
+            var path = file.GetZipKey();
+            if (dump)
+            {
+                path = Path.Combine("storage", path);
+            }
+
+            var restoreInfoXml = file.ToXElement();
+
+            try
+            {
+                await writer.WriteEntryAsync(path, file.Domain, file.Path, storage, progressAction);
+                await restoreInfoXml.WriteToAsync(tmpFile);
+            }
+            catch (FileNotFoundException ex)
+            {
+                var match = FileIdRegex().Match(file.Path);
+                if (match.Success && match.Groups.Count > 1 && int.TryParse(match.Groups[1].Value, out var fileId))
+                {
+                    await using var backupContext = await dbContextFactory.CreateDbContextAsync();
+                    var exist = await Queries.CheckFileExistenceAsync(backupContext, file.Tenant, fileId);
+                    if (exist)
+                    {
+                        throw;
+                    }
+                }
+
+                restoreInfoXml.Add(new XElement("error", ex.Message));
+                await restoreInfoXml.WriteToAsync(tmpErrorsFile);
+                hasMissingFiles = true;
+            }
+        }
+
+        bytes = "</storage_restore>"u8.ToArray();
+        await tmpFile.WriteAsync(bytes);
+        await writer.WriteEntryAsync(KeyHelper.GetStorageRestoreInfoZipKey(), tmpFile, () => Task.CompletedTask);
+
+        if (hasMissingFiles)
+        {
+            _missingFilesInfo = KeyHelper.GetStoragestoraMissingZipKey();
+            bytes = "</storage_missing>"u8.ToArray();
+            await tmpErrorsFile.WriteAsync(bytes);
+            await writer.WriteEntryAsync(_missingFilesInfo, tmpErrorsFile, () => Task.CompletedTask);
+        }
+
+        logger.DebugEndBackupStorage();
+    }
+
+    [GeneratedRegex(@"\\file_(\d+)\\")]
+    private static partial Regex FileIdRegex();
+
+    /// <summary>
+    /// Recalculating quota when excluding old backup files.
+    /// </summary>
+    private async Task<BackupCorrection> GetBackupCorrection(int tenantId)
+    {
+        await tenantManager.SetCurrentTenantAsync(tenantId);
+
+        var correction = new BackupCorrection();
+
+        await using var backupRecordContext = await dbContextFactory.CreateDbContextAsync();
+        var backupRecords = await Queries.BackupRecordsAsync(backupRecordContext, tenantId).ToListAsync();
+
+        if (backupRecords.Count == 0)
+        {
+            return correction;
+        }
+
+        var fileDao = daoFactory.GetFileDao<int>();
+        var folderDao = daoFactory.GetFolderDao<int>();
+
+        foreach (var backupRecord in backupRecords)
+        {
+            if (!int.TryParse(backupRecord.StoragePath, out var fileId))
+            {
+                continue;
+            }
+
+            var backupFile = await fileDao.GetFileAsync(fileId);
+
+            if (backupFile == null)
+            {
+                continue;
+            }
+
+            var backupFileParents = await folderDao.GetParentFoldersAsync(backupFile.ParentId).ToListAsync();
+
+            foreach (var backupFileParent in backupFileParents)
+            {
+                if (!correction.FoldersTable.TryGetValue(backupFileParent.Id, out var folderSize))
+                {
+                    folderSize = backupFileParent.Counter;
+                    correction.FoldersTable.Add(backupFileParent.Id, folderSize);
+                }
+
+                correction.FoldersTable[backupFileParent.Id] = Math.Max(0, folderSize - backupFile.ContentLength);
+            }
+
+            if (!correction.QuotaRowTable.TryGetValue(Guid.Empty, out var fullSize))
+            {
+                var tenantQuotaRow = (await quotaService.FindUserQuotaRowsAsync(TenantId, Guid.Empty))
+                    .FirstOrDefault(r => string.Equals(r.Path, correction.QuotaRowTableDocumentsPath) &&
+                                         string.Equals(r.Tag, correction.QuotaRowTableDocumentsTag));
+
+                fullSize = tenantQuotaRow?.Counter ?? 0;
+                correction.QuotaRowTable.Add(Guid.Empty, fullSize);
+            }
+
+            correction.QuotaRowTable[Guid.Empty] = Math.Max(0, fullSize - backupFile.ContentLength);
+
+            if (backupFile.RootFolderType == FolderType.USER)
+            {
+                if (!correction.QuotaRowTable.TryGetValue(backupFile.RootCreateBy, out var userSize))
+                {
+                    var userQuotaRow = (await quotaService.FindUserQuotaRowsAsync(TenantId, backupFile.RootCreateBy))
+                        .FirstOrDefault(r => string.Equals(r.Path, correction.QuotaRowTableDocumentsPath) &&
+                                             string.Equals(r.Tag, correction.QuotaRowTableDocumentsTag));
+
+                    userSize = userQuotaRow?.Counter ?? 0;
+                    correction.QuotaRowTable.Add(backupFile.RootCreateBy, userSize);
+                }
+
+                correction.QuotaRowTable[backupFile.RootCreateBy] = Math.Max(0, userSize - backupFile.ContentLength);
+            }
+        }
+
+        return correction;
+    }
+}
+
+static file class Queries
+{
+    public static readonly Func<BackupsContext, int, IAsyncEnumerable<BackupRecord>> BackupRecordsAsync = Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+        (BackupsContext ctx, int tenantId) =>
+            ctx.Backups.Where(b => b.TenantId == tenantId
+                                   && b.StorageType == 0
+                                   && b.StoragePath != null));
+
+    public static readonly Func<BackupsContext, int, IAsyncEnumerable<BackupRecord>> BackupRecordsIncludingDumpAsync = Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+        (BackupsContext ctx, int tenantId) =>
+            ctx.Backups.Where(b => (b.TenantId == tenantId || b.TenantId == -1)
+                                   && b.StorageType == 0
+                                   && b.StoragePath != null));
+
+    public static readonly Func<BackupsContext, int, int, Task<bool>> CheckFileExistenceAsync = Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+        (BackupsContext ctx, int tenantId, int fileId) =>
+            ctx.Files.Any(f => f.TenantId == tenantId && f.Id == fileId));
+}

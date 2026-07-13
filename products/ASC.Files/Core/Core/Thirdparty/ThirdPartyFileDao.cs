@@ -1,0 +1,914 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core.Core.Thirdparty;
+
+[Scope]
+internal abstract class ThirdPartyFileDao<TFile, TFolder, TItem>(
+    UserManager userManager,
+    IDbContextFactory<FilesDbContext> dbContextFactory,
+    IDaoSelector<TFile, TFolder, TItem> daoSelector,
+    CrossDao crossDao,
+    IFileDao<int> fileDao,
+    IDaoBase<TFile, TFolder, TItem> dao,
+    TenantManager tenantManager,
+    Global global)
+    : IFileDao<string>
+    where TFile : class, TItem
+    where TFolder : class, TItem
+    where TItem : class
+{
+    internal IDaoBase<TFile, TFolder, TItem> Dao { get; } = dao;
+    internal IProviderInfo<TFile, TFolder, TItem> ProviderInfo { get; private set; }
+
+    protected virtual string UploadSessionKey => "UploadSession";
+    private const string BytesTransferredKey = "BytesTransferred";
+
+    public void Init(string pathPrefix, IProviderInfo<TFile, TFolder, TItem> providerInfo)
+    {
+        Dao.Init(pathPrefix, providerInfo);
+        ProviderInfo = providerInfo;
+    }
+
+    public async Task InvalidateCacheAsync(string fileId)
+    {
+        var thirdFileId = Dao.MakeThirdId(fileId);
+        await ProviderInfo.CacheResetAsync(thirdFileId, true);
+
+        var thirdFile = await Dao.GetFileAsync(fileId);
+        var parentId = Dao.GetParentFolderId(thirdFile);
+
+        if (parentId != null)
+        {
+            await ProviderInfo.CacheResetAsync(parentId);
+        }
+    }
+
+    public Task<File<string>> GetFileAsync(string fileId)
+    {
+        return GetFileAsync(fileId, 1);
+    }
+
+    public async Task<File<string>> GetFileAsync(string fileId, int fileVersion)
+    {
+        return Dao.ToFile(await Dao.GetFileAsync(fileId));
+    }
+
+    public async Task<File<string>> GetFileAsync(string parentId, string title)
+    {
+        var items = await Dao.GetItemsAsync(parentId, false);
+
+        return Dao.ToFile(items.Find(item => Dao.GetName(item).Equals(title, StringComparison.InvariantCultureIgnoreCase)) as TFile);
+    }
+
+    public async Task<File<string>> GetFileStableAsync(string fileId, int fileVersion = -1)
+    {
+        return Dao.ToFile(await Dao.GetFileAsync(fileId));
+    }
+
+    public async IAsyncEnumerable<File<string>> GetFileHistoryAsync(string fileId)
+    {
+        var file = await GetFileAsync(fileId);
+        yield return file;
+    }
+
+    public async IAsyncEnumerable<File<string>> GetFilesAsync(IEnumerable<string> fileIds)
+    {
+        if (fileIds == null || !fileIds.Any())
+        {
+            yield break;
+        }
+
+        foreach (var fileId in fileIds)
+        {
+            yield return Dao.ToFile(await Dao.GetFileAsync(fileId));
+        }
+    }
+
+    public IAsyncEnumerable<File<string>> GetFilesFilteredAsync(IEnumerable<string> fileIds, IEnumerable<string> excludeParentsIds, FilterType filterType, bool subjectGroup, Guid subjectID, string searchText, string[] extension,
+        bool searchInContent)
+    {
+        if (fileIds == null || !fileIds.Any() || filterType == FilterType.FoldersOnly)
+        {
+            return AsyncEnumerable.Empty<File<string>>();
+        }
+
+        var files = GetFilesAsync(fileIds);
+
+        //Filter
+        if (subjectID != Guid.Empty)
+        {
+            files = files.Where(async (x, _) => subjectGroup
+                ? await userManager.IsUserInGroupAsync(x.CreateBy, subjectID)
+                : x.CreateBy == subjectID);
+        }
+
+        switch (filterType)
+        {
+            case FilterType.DocumentsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Document);
+                break;
+            case FilterType.Pdf:
+            case FilterType.PdfForm:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Pdf);
+                break;
+            case FilterType.PresentationsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Presentation);
+                break;
+            case FilterType.SpreadsheetsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Spreadsheet);
+                break;
+            case FilterType.ImagesOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Image);
+                break;
+            case FilterType.ArchiveOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Archive);
+                break;
+            case FilterType.MediaOnly:
+                files = files.Where(x =>
+                {
+                    var fileType = FileUtility.GetFileTypeByFileName(x.Title);
+                    return fileType is FileType.Audio or FileType.Video;
+                });
+                break;
+            case FilterType.DiagramsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Diagram);
+                break;
+            case FilterType.ByExtension:
+                if (!string.IsNullOrEmpty(searchText))
+                {
+                    searchText = searchText.Trim().ToLower();
+                    files = files.Where(x => FileUtility.GetFileExtension(x.Title).Equals(searchText));
+                }
+
+                break;
+        }
+
+        if (!string.IsNullOrEmpty(searchText))
+        {
+            files = files.Where(x => x.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!extension.IsNullOrEmpty())
+        {
+            extension = extension.Select(e => e.Trim().ToLower()).ToArray();
+            files = files.Where(x => extension.Contains(FileUtility.GetFileExtension(x.Title)));
+        }
+
+        return files;
+    }
+
+    public async IAsyncEnumerable<string> GetFilesAsync(string parentId)
+    {
+        var items = await Dao.GetItemsAsync(parentId, false);
+
+        foreach (var item in items)
+        {
+            yield return Dao.MakeId(Dao.GetId(item));
+        }
+    }
+
+    public async IAsyncEnumerable<File<string>> GetFilesAsync(string parentId, OrderBy orderBy, FilterType filterType, bool subjectGroup, Guid subjectID, string searchText,
+        string[] extension, bool searchInContent, bool withSubfolders = false, bool excludeSubject = false, int offset = 0, int count = -1, string roomId = null, bool withShared = false, bool containingMyFiles = false, FolderType parentType = FolderType.DEFAULT, FormsItemDto formsItemDto = null, bool applyFormStepFilter = false, bool applyFfrStartedFormsFilter = false)
+    {
+        if (filterType == FilterType.FoldersOnly)
+        {
+            yield break;
+        }
+
+        List<TItem> filesWait;
+
+        try
+        {
+            filesWait = await Dao.GetItemsAsync(parentId, false);
+        }
+        catch
+        {
+            filesWait = [];
+        }
+
+        var files = filesWait.Select(item => Dao.ToFile(item as TFile)).ToAsyncEnumerable();
+
+        if (subjectID != Guid.Empty)
+        {
+            files = files.Where(async (x, _) => subjectGroup
+                ? await userManager.IsUserInGroupAsync(x.CreateBy, subjectID)
+                : x.CreateBy == subjectID);
+        }
+
+        switch (filterType)
+        {
+            case FilterType.DocumentsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Document);
+                break;
+            case FilterType.Pdf:
+            case FilterType.PdfForm:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Pdf);
+                break;
+            case FilterType.PresentationsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Presentation);
+                break;
+            case FilterType.SpreadsheetsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Spreadsheet);
+                break;
+            case FilterType.ImagesOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Image);
+                break;
+            case FilterType.ArchiveOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Archive);
+                break;
+            case FilterType.MediaOnly:
+                files = files.Where(x =>
+                {
+                    var fileType = FileUtility.GetFileTypeByFileName(x.Title);
+
+                    return fileType is FileType.Audio or FileType.Video;
+                });
+                break;
+            case FilterType.DiagramsOnly:
+                files = files.Where(x => FileUtility.GetFileTypeByFileName(x.Title) == FileType.Diagram);
+                break;
+            case FilterType.ByExtension:
+                if (!string.IsNullOrEmpty(searchText))
+                {
+                    searchText = searchText.Trim().ToLower();
+                    files = files.Where(x => FileUtility.GetFileExtension(x.Title).Equals(searchText));
+                }
+
+                break;
+        }
+
+        if (!string.IsNullOrEmpty(searchText))
+        {
+            files = files.Where(x => x.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!extension.IsNullOrEmpty())
+        {
+            extension = extension.Select(e => e.Trim().ToLower()).ToArray();
+            files = files.Where(x => extension.Contains(FileUtility.GetFileExtension(x.Title)));
+        }
+
+        orderBy ??= new OrderBy(SortedByType.DateAndTime, false);
+
+        files = orderBy.SortedBy switch
+        {
+            SortedByType.Author => orderBy.IsAsc ? files.OrderBy(x => x.CreateBy) : files.OrderByDescending(x => x.CreateBy),
+            SortedByType.AZ => orderBy.IsAsc ? files.OrderBy(x => x.Title) : files.OrderByDescending(x => x.Title),
+            SortedByType.DateAndTime => orderBy.IsAsc ? files.OrderBy(x => x.ModifiedOn) : files.OrderByDescending(x => x.ModifiedOn),
+            SortedByType.DateAndTimeCreation => orderBy.IsAsc ? files.OrderBy(x => x.CreateOn) : files.OrderByDescending(x => x.CreateOn),
+            _ => orderBy.IsAsc ? files.OrderBy(x => x.Title) : files.OrderByDescending(x => x.Title)
+        };
+
+        await foreach (var f in files)
+        {
+            yield return f;
+        }
+    }
+
+    public Task<Stream> GetFileStreamAsync(File<string> file)
+    {
+        return GetFileStreamAsync(file, 0);
+    }
+
+    public async Task<Stream> GetFileStreamAsync(File<string> file, long offset)
+    {
+        var fileId = Dao.MakeThirdId(file.Id);
+        await ProviderInfo.CacheResetAsync(fileId, true);
+
+        var thirdFile = await Dao.GetFileAsync(file.Id);
+        if (thirdFile == null)
+        {
+            throw new ArgumentNullException(nameof(file), FilesCommonResource.ErrorMessage_FileNotFound);
+        }
+
+        if (thirdFile is IErrorItem errorFile)
+        {
+            throw new Exception(errorFile.Error);
+        }
+
+        var storage = await ProviderInfo.StorageAsync;
+        var fileStream = await storage.DownloadStreamAsync(thirdFile, (int)offset);
+
+        return fileStream;
+    }
+
+
+    public async Task<Stream> GetFileStreamAsync(File<string> file, long offset, long length)
+    {
+        return await GetFileStreamAsync(file, offset);
+    }
+
+    public async Task<long> GetFileSizeAsync(File<string> file)
+    {
+        var fileId = Dao.MakeThirdId(file.Id);
+        await ProviderInfo.CacheResetAsync(fileId, true);
+
+        var thirdFile = await Dao.GetFileAsync(file.Id);
+        if (thirdFile == null)
+        {
+            throw new ArgumentNullException(nameof(file), FilesCommonResource.ErrorMessage_FileNotFound);
+        }
+
+        if (thirdFile is IErrorItem errorFile)
+        {
+            throw new Exception(errorFile.Error);
+        }
+
+        var storage = await ProviderInfo.StorageAsync;
+        var size = await storage.GetFileSizeAsync(thirdFile);
+
+        return size;
+    }
+
+    public Task<bool> IsSupportedPreSignedUriAsync(File<string> file)
+    {
+        return Task.FromResult(false);
+    }
+    public async Task<File<string>> SaveFileAsync(File<string> file, Stream fileStream, bool checkFolder)
+    {
+        return await SaveFileAsync(file, fileStream);
+    }
+
+    public async Task<File<string>> SaveFileAsync(File<string> file, Stream fileStream, Guid chatId = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(fileStream);
+
+        TFile newFile = null;
+        var storage = await ProviderInfo.StorageAsync;
+
+        if (file.Id != null)
+        {
+            var fileId = Dao.MakeThirdId(file.Id);
+            newFile = await storage.SaveStreamAsync(fileId, fileStream);
+
+            if (!Dao.GetName(newFile).Equals(file.Title))
+            {
+                var folderId = Dao.GetParentFolderId(await Dao.GetFileAsync(fileId));
+                file.Title = await GetAvailableTitleAsync(file.Title, folderId);
+                newFile = await storage.RenameFileAsync(fileId, file.Title);
+            }
+        }
+        else if (file.ParentId != null)
+        {
+            var folderId = Dao.MakeThirdId(file.ParentId);
+            file.Title = await GetAvailableTitleAsync(file.Title, folderId);
+            newFile = await storage.CreateFileAsync(fileStream, file.Title, folderId);
+        }
+
+        await ProviderInfo.CacheResetAsync(Dao.GetId(newFile));
+        var parentId = Dao.GetParentFolderId(newFile);
+        if (parentId != null)
+        {
+            await ProviderInfo.CacheResetAsync(parentId);
+        }
+
+        return Dao.ToFile(newFile);
+    }
+
+    public async Task<bool> IsExistAsync(string title, string folderId)
+    {
+        var item = await Dao.GetItemsAsync(folderId, false);
+
+        return item.Exists(i => Dao.GetName(i).Equals(title, StringComparison.InvariantCultureIgnoreCase));
+    }
+
+    public async Task<bool> IsExistAsync(string title, int category, string folderId)
+    {
+        return await IsExistAsync(title, folderId);
+    }
+
+    public async Task<string> GetAvailableTitleAsync(string requestTitle, string parentFolderId)
+    {
+        return await global.GetAvailableTitleAsync(requestTitle, parentFolderId, IsExistAsync, FileEntryType.File);
+    }
+
+    public Task<File<string>> ReplaceFileVersionAsync(File<string> file, Stream fileStream)
+    {
+        return SaveFileAsync(file, fileStream);
+    }
+
+    public async Task DeleteFileVersionAsync(File<string> file, int version)
+    {
+        await DeleteFileAsync(file.Id);
+    }
+
+    public async Task DeleteFileAsync(string fileId, Guid ownerId)
+    {
+        await DeleteFileAsync(fileId);
+    }
+
+    public async Task DeleteFileAsync(string fileId)
+    {
+        var file = await Dao.GetFileAsync(fileId);
+        if (file == null)
+        {
+            return;
+        }
+
+        var id = Dao.MakeId(Dao.GetId(file));
+
+        var tenantId = tenantManager.GetCurrentTenantId();
+        await using var filesDbContext = await dbContextFactory.CreateDbContextAsync();
+        var strategy = filesDbContext.Database.CreateExecutionStrategy();
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var dbContext = await dbContextFactory.CreateDbContextAsync();
+            await using var tx = await dbContext.Database.BeginTransactionAsync();
+            await Queries.DeleteTagLinksAsync(dbContext, tenantId, id);
+            await Queries.DeleteTagsAsync(dbContext);
+            await Queries.DeleteFilesSecuritiesAsync(dbContext, tenantId, id);
+            await Queries.DeleteThirdpartyIdMappingsAsync(dbContext, tenantId, id);
+
+            await tx.CommitAsync();
+        });
+
+        if (file is not IErrorItem)
+        {
+            var storage = await ProviderInfo.StorageAsync;
+            await storage.DeleteItemAsync(file);
+        }
+
+        await ProviderInfo.CacheResetAsync(Dao.GetId(file), true);
+        var parentFolderId = Dao.GetParentFolderId(file);
+        if (parentFolderId != null)
+        {
+            await ProviderInfo.CacheResetAsync(parentFolderId);
+        }
+    }
+
+    public async Task<TTo> MoveFileAsync<TTo>(string fileId, TTo toFolderId, bool deleteLinks = false)
+    {
+        if (toFolderId is int tId)
+        {
+            return IdConverter.Convert<TTo>(await MoveFileAsync(fileId, tId));
+        }
+
+        if (toFolderId is string tsId)
+        {
+            return IdConverter.Convert<TTo>(await MoveFileAsync(fileId, tsId));
+        }
+
+        throw new NotImplementedException();
+    }
+
+    public async Task<int> MoveFileAsync(string fileId, int toFolderId, bool deleteLinks = false)
+    {
+        var moved = await crossDao.PerformCrossDaoFileCopyAsync(
+            fileId, this, daoSelector.ConvertId,
+            toFolderId, fileDao, r => r,
+            true);
+
+        return moved.Id;
+    }
+
+    public async Task<string> MoveFileAsync(string fileId, string toFolderId, bool deleteLinks = false)
+    {
+        var file = await Dao.GetFileAsync(fileId);
+        if (file is IErrorItem errorFile)
+        {
+            throw new Exception(errorFile.Error);
+        }
+
+        var toFolder = await Dao.GetFolderAsync(toFolderId);
+        if (toFolder is IErrorItem errorFolder)
+        {
+            throw new Exception(errorFolder.Error);
+        }
+
+        var newTitle = await GetAvailableTitleAsync(Dao.GetName(file), Dao.GetId(toFolder));
+        var storage = await ProviderInfo.StorageAsync;
+        var movedFile = await storage.MoveFileAsync(Dao.GetId(file), newTitle, Dao.GetId(toFolder));
+
+        await ProviderInfo.CacheResetAsync(Dao.GetId(file), true);
+        await ProviderInfo.CacheResetAsync(Dao.GetId(toFolder));
+        await ProviderInfo.CacheResetAsync(Dao.GetParentFolderId(file));
+
+        var newId = Dao.MakeId(Dao.GetId(movedFile));
+
+        if (ProviderInfo.MutableEntityId)
+        {
+            await Dao.UpdateIdAsync(Dao.MakeId(file), newId);
+        }
+
+        return newId;
+    }
+
+    public async Task<File<TTo>> CopyFileAsync<TTo>(string fileId, TTo toFolderId)
+    {
+        if (toFolderId is int tId)
+        {
+            return await CopyFileAsync(fileId, tId) as File<TTo>;
+        }
+
+        if (toFolderId is string tsId)
+        {
+            return await CopyFileAsync(fileId, tsId) as File<TTo>;
+        }
+
+        throw new NotImplementedException();
+    }
+
+    public async Task<File<string>> CopyFileAsync(string fileId, string toFolderId)
+    {
+        var file = await Dao.GetFileAsync(fileId);
+        if (file is IErrorItem errorFile)
+        {
+            throw new Exception(errorFile.Error);
+        }
+
+        var toFolder = await Dao.GetFolderAsync(toFolderId);
+        if (toFolder is IErrorItem errorFolder)
+        {
+            throw new Exception(errorFolder.Error);
+        }
+
+        var newTitle = await GetAvailableTitleAsync(Dao.GetName(file), Dao.GetId(toFolder));
+        var storage = await ProviderInfo.StorageAsync;
+        var newFile = await storage.CopyFileAsync(Dao.GetId(file), newTitle, Dao.GetId(toFolder));
+
+        await ProviderInfo.CacheResetAsync(Dao.GetId(newFile));
+        await ProviderInfo.CacheResetAsync(Dao.GetId(toFolder));
+
+        return Dao.ToFile(newFile);
+    }
+
+    public Task<File<int>> CopyFileAsync(string fileId, int toFolderId, Guid chatId)
+    {
+        return crossDao.PerformCrossDaoFileCopyAsync(
+            fileId, this, daoSelector.ConvertId,
+            toFolderId, fileDao, r => r,
+            false, chatId);
+    }
+
+    public async Task<string> FileRenameAsync(File<string> file, string newTitle)
+    {
+        var thirdFile = await Dao.GetFileAsync(file.Id);
+        newTitle = await GetAvailableTitleAsync(newTitle, Dao.GetParentFolderId(thirdFile));
+
+        var storage = await ProviderInfo.StorageAsync;
+        var renamedThirdFile = await storage.RenameFileAsync(Dao.GetId(thirdFile), newTitle);
+
+        await ProviderInfo.CacheResetAsync(Dao.GetId(thirdFile), true);
+        var parentId = Dao.GetParentFolderId(thirdFile);
+        if (parentId != null)
+        {
+            await ProviderInfo.CacheResetAsync(parentId);
+        }
+
+        var newId = Dao.MakeId(Dao.GetId(renamedThirdFile));
+
+        if (ProviderInfo.MutableEntityId)
+        {
+            await Dao.UpdateIdAsync(Dao.MakeId(thirdFile), newId);
+        }
+
+        return newId;
+    }
+
+    public Task<string> UpdateCommentAsync(string fileId, int fileVersion, string comment)
+    {
+        return Task.FromResult(string.Empty);
+    }
+
+    public Task CompleteVersionAsync(string fileId, int fileVersion)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task ContinueVersionAsync(string fileId, int fileVersion)
+    {
+        return Task.FromResult(0);
+    }
+
+    public bool UseTrashForRemove(File<string> file)
+    {
+        return false;
+    }
+
+    public async Task<Stream> GetThumbnailAsync(string fileId, uint width, uint height)
+    {
+        var thirdFileId = Dao.MakeThirdId(fileId);
+
+        var storage = await ProviderInfo.StorageAsync;
+        return await storage.GetThumbnailAsync(thirdFileId, width, height);
+    }
+
+    internal File<string> RestoreIds(File<string> file)
+    {
+        if (file == null)
+        {
+            return null;
+        }
+
+        if (file.Id != null)
+        {
+            file.Id = Dao.MakeId(file.Id);
+        }
+
+        if (file.ParentId != null)
+        {
+            file.ParentId = Dao.MakeId(file.ParentId);
+        }
+
+        return file;
+    }
+
+    public abstract Task<ChunkedUploadSession<string>> CreateUploadSessionAsync(File<string> file, long contentLength);
+
+    public virtual async Task<File<string>> UploadChunkAsync(ChunkedUploadSession<string> uploadSession, Stream stream, long chunkLength, int? chunkNumber = null)
+    {
+        if (!uploadSession.UseChunks)
+        {
+            if (uploadSession.BytesTotal == 0)
+            {
+                uploadSession.BytesTotal = chunkLength;
+            }
+
+            uploadSession.File = await SaveFileAsync(uploadSession.File, stream);
+            uploadSession.Items[BytesTransferredKey] = chunkLength.ToString();
+
+            return uploadSession.File;
+        }
+
+        if (uploadSession.Items.ContainsKey(UploadSessionKey))
+        {
+            await NativeUploadChunkAsync(uploadSession, stream, chunkLength);
+        }
+        else
+        {
+            var path = uploadSession.TempPath;
+            await using var fs = new FileStream(path, FileMode.Append);
+            await stream.CopyToAsync(fs);
+
+            if (!uploadSession.Items.TryAdd(BytesTransferredKey, chunkLength.ToString()))
+            {
+                if (long.TryParse(uploadSession.GetItemOrDefault<string>(BytesTransferredKey), out var transferred))
+                {
+                    uploadSession.Items[BytesTransferredKey] = (transferred + chunkLength).ToString();
+                }
+            }
+        }
+
+        uploadSession.File = RestoreIds(uploadSession.File);
+
+        return uploadSession.File;
+    }
+
+    protected abstract Task NativeUploadChunkAsync(ChunkedUploadSession<string> uploadSession, Stream stream, long chunkLength);
+
+    public abstract Task<File<string>> FinalizeUploadSessionAsync(ChunkedUploadSession<string> uploadSession);
+
+    public abstract Task AbortUploadSessionAsync(ChunkedUploadSession<string> uploadSession);
+
+    public Task ReassignFilesAsync(Guid oldOwner, Guid newOwnerId, IEnumerable<string> exceptFolderIds)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task ReassignFilesAsync(Guid newOwnerId, IEnumerable<string> fileIds)
+    {
+        return Task.CompletedTask;
+    }
+
+    public IAsyncEnumerable<File<string>> GetFilesAsync(IEnumerable<string> parentIds, FilterType filterType, bool subjectGroup, Guid subjectID, string searchText, string[] extension,
+        bool searchInContent)
+    {
+        return AsyncEnumerable.Empty<File<string>>();
+    }
+
+    public IAsyncEnumerable<File<string>> SearchAsync(string text, bool bunch)
+    {
+        return null;
+    }
+
+    public Task<bool> IsExistOnStorageAsync(File<string> file)
+    {
+        return Task.FromResult(true);
+    }
+
+    public Task SaveEditHistoryAsync(File<string> file, string changes, Stream differenceStream)
+    {
+        //Do nothing
+        return Task.CompletedTask;
+    }
+
+    public IAsyncEnumerable<EditHistory> GetEditHistoryAsync(DocumentServiceHelper documentServiceHelper, string fileId, int fileVersion)
+    {
+        return null;
+    }
+
+    public Task<Stream> GetDifferenceStreamAsync(File<string> file)
+    {
+        return Task.FromResult<Stream>(null);
+    }
+
+    public Task<bool> ContainChangesAsync(string fileId, int fileVersion)
+    {
+        return Task.FromResult(false);
+    }
+
+    public string GetUniqThumbnailPath(File<string> file, uint width, uint height)
+    {
+        //Do nothing
+        return null;
+    }
+
+    public Task SetThumbnailStatusAsync(File<string> file, Thumbnail status)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task<Stream> GetThumbnailAsync(File<string> file, uint width, uint height)
+    {
+        return GetThumbnailAsync(file.Id, width, height);
+    }
+
+    public Task<EntryProperties<string>> GetProperties(string fileId)
+    {
+        return Task.FromResult<EntryProperties<string>>(null);
+    }
+
+    public Task<Dictionary<string, EntryProperties<string>>> GetPropertiesAsync(IEnumerable<string> filesIds)
+    {
+        return Task.FromResult<Dictionary<string, EntryProperties<string>>>(null);
+    }
+
+    public Task SaveProperties(string fileId, EntryProperties<string> entryProperties)
+    {
+        return Task.CompletedTask;
+    }
+
+    public string GetUniqFilePath(File<string> file, string fileTitle)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<string> GetPreSignedUriAsync(File<string> file, TimeSpan expires, string shareKey = null)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<int> GetFilesCountAsync(string parentId, FilterType filterType, bool subjectGroup, Guid subjectId, string searchText, string[] extension, bool searchInContent, bool withSubfolders = false,
+        bool excludeSubject = false, string roomId = null, FormsItemDto formsItemDto = null, FolderType parentType = FolderType.DEFAULT, AdditionalFilterOption additionalFilterOption = AdditionalFilterOption.All, bool applyFormStepFilter = false)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<int> GetSharedFilesCountAsync(string parentId)
+    {
+        return Task.FromResult(0);
+    }
+
+    public IAsyncEnumerable<File<string>> GetSharedFilesAsync(string parentId, int offset = 0, int count = -1)
+    {
+        return AsyncEnumerable.Empty<File<string>>();
+    }
+
+    public Task<int> SetCustomOrder(string fileId, string parentFolderId, int order)
+    {
+        return Task.FromResult(0);
+    }
+
+    public Task InitCustomOrder(Dictionary<string, int> fileIds, string parentFolderId)
+    {
+        return Task.CompletedTask;
+    }
+
+    public IAsyncEnumerable<File<string>> GetFilesByTagAsync(Guid tagOwner, IEnumerable<TagType> tagType, FilterType filterType, bool subjectGroup, Guid subjectId,
+        string searchText, string[] extension, bool searchInContent, bool excludeSubject, Location? location, int trashId, OrderBy orderBy, int offset, int count)
+    {
+        return AsyncEnumerable.Empty<File<string>>();
+    }
+
+    public Task<int> GetFilesByTagCountAsync(Guid tagOwner, IEnumerable<TagType> tagType, FilterType filterType, bool subjectGroup, Guid subjectId,
+        string searchText, string[] extension, bool searchInContent, bool excludeSubject, Location? location, int trashId)
+    {
+        return Task.FromResult(0);
+    }
+
+    public Task<long> GetTransferredBytesCountAsync(ChunkedUploadSession<string> uploadSession)
+    {
+        uploadSession.File = RestoreIds(uploadSession.File);
+
+        if (!uploadSession.Items.ContainsKey(UploadSessionKey))
+        {
+            return long.TryParse(uploadSession.GetItemOrDefault<string>(BytesTransferredKey), out var transferred)
+                ? Task.FromResult(transferred)
+                : null;
+        }
+
+        var nativeSession = uploadSession.GetItemOrDefault<ThirdPartyUploadSessionBase>(UploadSessionKey);
+
+        return Task.FromResult(nativeSession.BytesTransferred);
+    }
+
+    public Task SaveFormRoleMapping(string formId, IEnumerable<FormRole> formRoles)
+    {
+        return Task.CompletedTask;
+    }
+    public IAsyncEnumerable<FormRole> GetFormRoles(string formId)
+    {
+        return AsyncEnumerable.Empty<FormRole>();
+    }
+    public Task<(int, List<FormRole>)> GetUserFormRoles(string formId, Guid userId)
+    {
+        return Task.FromResult((-1, new List<FormRole>()));
+    }
+    public IAsyncEnumerable<FormRole> GetUserFormRolesInRoom(string roomId, Guid userId)
+    {
+        return AsyncEnumerable.Empty<FormRole>();
+    }
+    public Task<FormRole> ChangeUserFormRoleAsync(string formId, FormRole formRole)
+    {
+        return Task.FromResult<FormRole>(null);
+    }
+    public Task DeleteFormRolesAsync(string formId)
+    {
+        return Task.CompletedTask;
+    }
+    public Task<int> UpdateCategoryAsync(string fileId, int fileVersion, int category, ForcesaveType forcesave)
+    {
+        return Task.FromResult(0);
+    }
+
+    public Task SetVectorizationStatusAsync(string fileId, VectorizationStatus status, Func<Task> action = null)
+    {
+        return Task.CompletedTask;
+    }
+}
+
+static file class Queries
+{
+    public static readonly Func<FilesDbContext, Task<int>> DeleteTagsAsync =
+        Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+            (FilesDbContext ctx) =>
+                (from ft in ctx.Tag
+                 join ftl in ctx.TagLink.DefaultIfEmpty() on new { ft.TenantId, ft.Id } equals new { ftl.TenantId, Id = ftl.TagId }
+                 where ftl == null
+                 select ft)
+                .ExecuteDelete());
+
+    public static readonly Func<FilesDbContext, int, string, Task<int>> DeleteTagLinksAsync =
+        Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+            (FilesDbContext ctx, int tenantId, string idStart) =>
+                ctx.TagLink
+                    .Where(r => r.TenantId == tenantId)
+                    .Where(r => ctx.ThirdpartyIdMapping
+                        .Where(t => t.TenantId == tenantId)
+                        .Where(t => t.Id.StartsWith(idStart))
+                        .Select(t => t.HashId).Any(h => h == r.EntryId))
+                    .ExecuteDelete());
+
+    public static readonly Func<FilesDbContext, int, string, Task<int>> DeleteFilesSecuritiesAsync =
+        Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+            (FilesDbContext ctx, int tenantId, string idStart) =>
+                ctx.Security
+                    .Where(r => r.TenantId == tenantId)
+                    .Where(r => ctx.ThirdpartyIdMapping
+                        .Where(t => t.TenantId == tenantId)
+                        .Where(t => t.Id.StartsWith(idStart))
+                        .Select(t => t.HashId).Any(h => h == r.EntryId))
+                    .ExecuteDelete());
+
+    public static readonly Func<FilesDbContext, int, string, Task<int>>
+        DeleteThirdpartyIdMappingsAsync =
+            Microsoft.EntityFrameworkCore.EF.CompileAsyncQuery(
+                (FilesDbContext ctx, int tenantId, string idStart) =>
+                    ctx.ThirdpartyIdMapping
+                        .Where(r => r.TenantId == tenantId)
+                        .Where(t => t.Id.StartsWith(idStart))
+                        .ExecuteDelete());
+}

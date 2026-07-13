@@ -1,0 +1,123 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Common.Utils;
+
+public static class HtmlUtil
+{
+    private static readonly Regex _tagReplacer = new("<[^>]*>", RegexOptions.Multiline | RegexOptions.Compiled);
+
+    private static readonly Regex _commentsReplacer
+        = new("<!--(?s).*?-->", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex _xssReplacer
+        = new(@"<\s*(style|script)[^>]*>(.*?)<\s*/\s*(style|script)>", RegexOptions.IgnoreCase
+                                                                       | RegexOptions.CultureInvariant | RegexOptions.Compiled | RegexOptions.Singleline);
+
+    private static readonly Regex _worder =
+        new(@"\S+", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    public static string GetText(string html, int maxLength = 0, string endBlockTemplate = "...")
+    {
+        var unformatedText = string.Empty;
+
+        if (!string.IsNullOrEmpty(html))
+        {
+            html = _xssReplacer.Replace(html, string.Empty); //Clean malicious tags. <script> <style>
+
+            if (string.IsNullOrEmpty(html))
+            {
+                return html;
+            }
+
+            unformatedText = _tagReplacer.Replace(html, string.Empty);
+
+            if (!string.IsNullOrEmpty(unformatedText))
+            {
+                // kill comments
+                unformatedText = _commentsReplacer.Replace(unformatedText, string.Empty);
+                unformatedText = unformatedText.Trim();
+
+                if (!string.IsNullOrEmpty(unformatedText))
+                {
+                    if (maxLength == 0 || unformatedText.Length < maxLength)
+                    {
+                        return HttpUtility.HtmlDecode(unformatedText);
+                    }
+
+                    //Set maximum length with end block
+                    maxLength = Math.Max(0, maxLength - endBlockTemplate.Length);
+                    var startIndex = Math.Max(0, Math.Min(unformatedText.Length - 1, maxLength));
+                    var countToScan = Math.Max(0, startIndex - 1);
+
+                    var lastSpaceIndex = unformatedText.LastIndexOf(' ', startIndex, countToScan);
+
+                    unformatedText = lastSpaceIndex > 0 && lastSpaceIndex < unformatedText.Length
+                                         ? unformatedText.Remove(lastSpaceIndex)
+                                         : unformatedText[..maxLength];
+
+                    if (!string.IsNullOrEmpty(endBlockTemplate))
+                    {
+                        unformatedText += endBlockTemplate;
+                    }
+                }
+            }
+        }
+
+        return HttpUtility.HtmlDecode(unformatedText);//TODO:!!!
+    }
+
+    public static string ToPlainText(string html)
+    {
+        return GetText(html);
+    }
+
+    /// <summary>
+    /// The function highlight all words in htmlText by searchText.
+    /// </summary>
+    /// <param name="searchText">the space separated string</param>
+    /// <param name="htmlText">html for highlight</param>
+    /// <param name="withoutLink"></param>
+    /// <returns>highlighted html</returns>
+    public static string SearchTextHighlight(string searchText, string htmlText, bool withoutLink = false)
+    {
+        if (string.IsNullOrEmpty(searchText) || string.IsNullOrEmpty(htmlText))
+        {
+            return htmlText;
+        }
+
+        var regexpstr = _worder.Matches(searchText).Select(m => m.Value).Distinct().Aggregate((r, n) => r + "|" + n);
+        var wordsFinder = new Regex(Regex.Escape(regexpstr), RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Multiline);
+        return wordsFinder.Replace(htmlText, m => "<span class='searchTextHighlight" + (withoutLink ? " bold" : string.Empty) + "'>" + m.Value + "</span>");
+    }
+}

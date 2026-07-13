@@ -1,0 +1,127 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.application.security.filter;
+
+import com.asc.registration.application.security.authentication.BasicSignatureToken;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+/**
+ * Filter for authenticating requests using a basic signature token. This filter checks the presence
+ * of a signature cookie in the HTTP request and attempts to authenticate the token using the
+ * provided {@link AuthenticationManager}. If authentication succeeds, the security context is
+ * updated; otherwise, the request is rejected.
+ */
+@Slf4j
+@Component("registrationBasicSignatureAuthenticationFilter")
+public class BasicSignatureAuthenticationFilter extends OncePerRequestFilter {
+  private static final String SIGNATURE_COOKIE = "x-signature";
+  private final AuthenticationManager authenticationManager;
+
+  public BasicSignatureAuthenticationFilter(
+      @Qualifier("registrationSignatureAuthenticationManager")
+          AuthenticationManager authenticationManager) {
+    this.authenticationManager = authenticationManager;
+  }
+
+  /**
+   * Performs filtering of incoming HTTP requests to authenticate requests containing the signature
+   * header.
+   *
+   * <p>If the {@code x-signature} is present in the request, the token is validated and
+   * authenticated using the {@link AuthenticationManager}. On successful authentication, the
+   * security context is updated with the authenticated token. If authentication fails, the response
+   * is set to {@code 403 Forbidden}.
+   *
+   * @param request the incoming HTTP request
+   * @param response the HTTP response to be sent
+   * @param chain the filter chain to pass the request and response to the next filter
+   * @throws ServletException if an error occurs during the filtering process
+   * @throws IOException if an I/O error occurs
+   */
+  protected void doFilterInternal(
+      HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+      throws ServletException, IOException {
+    var token =
+        Arrays.stream(Optional.ofNullable(request.getCookies()).orElse(new Cookie[0]))
+            .filter(c -> c.getName().equalsIgnoreCase(SIGNATURE_COOKIE))
+            .findFirst()
+            .map(Cookie::getValue)
+            .orElseGet(() -> request.getHeader(SIGNATURE_COOKIE));
+
+    if (token == null || token.isBlank()) {
+      log.debug(
+          "Authentication signature is missing in both cookie and header, passing the request down the filter chain");
+      chain.doFilter(request, response);
+      return;
+    }
+
+    try {
+      MDC.put("request_uri", request.getRequestURI());
+      log.debug("Validating user");
+
+      var authentication = new BasicSignatureToken(token);
+      authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+
+      var authenticated = authenticationManager.authenticate(authentication);
+
+      if (authenticated.isAuthenticated()) {
+        SecurityContextHolder.getContext().setAuthentication(authenticated);
+      }
+
+      chain.doFilter(request, response);
+    } catch (BadCredentialsException ex) {
+      log.warn("Authentication failed: {}", ex.getMessage());
+      response.setStatus(HttpStatus.FORBIDDEN.value());
+    } finally {
+      MDC.clear();
+    }
+  }
+}

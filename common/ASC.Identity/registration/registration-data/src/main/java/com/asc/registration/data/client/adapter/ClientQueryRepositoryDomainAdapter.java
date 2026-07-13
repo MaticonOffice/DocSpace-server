@@ -1,0 +1,223 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.data.client.adapter;
+
+import com.asc.common.core.domain.value.ClientId;
+import com.asc.common.core.domain.value.TenantId;
+import com.asc.common.core.domain.value.UserId;
+import com.asc.common.core.domain.value.enums.ClientVisibility;
+import com.asc.registration.core.domain.entity.Client;
+import com.asc.registration.data.client.mapper.ClientDataAccessMapper;
+import com.asc.registration.data.client.repository.JpaClientRepository;
+import com.asc.registration.service.ports.output.repository.ClientQueryRepository;
+import com.asc.registration.service.transfer.response.PageableResponse;
+import java.time.ZonedDateTime;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Adapter class for handling client query operations and mapping between domain and data layers.
+ * Implements the {@link ClientQueryRepository} interface, providing database access logic for
+ * querying client entities using a JPA repository.
+ */
+@Slf4j
+@Repository
+@Profile("!saas")
+@RequiredArgsConstructor
+public class ClientQueryRepositoryDomainAdapter implements ClientQueryRepository {
+  private final JpaClientRepository jpaClientRepository;
+  private final ClientDataAccessMapper clientDataAccessMapper;
+
+  /**
+   * Finds a client by its ID and visibility.
+   *
+   * @param clientId the unique identifier of the client
+   * @param visibility the visibility status of the client (e.g., PUBLIC or PRIVATE)
+   * @return an {@link Optional} containing the found client if it exists, or empty otherwise
+   */
+  @Transactional(timeout = 2, readOnly = true)
+  public Optional<Client> findByIdAndVisibility(ClientId clientId, ClientVisibility visibility) {
+    log.debug("Querying client by client id and visibility");
+    return jpaClientRepository
+        .findByIdAndVisibility(
+            clientId.getValue().toString(), visibility.equals(ClientVisibility.PUBLIC))
+        .map(clientDataAccessMapper::toDomain);
+  }
+
+  /**
+   * Finds a client by its ID.
+   *
+   * @param clientId the unique identifier of the client
+   * @return an {@link Optional} containing the found client if it exists, or empty otherwise
+   */
+  @Transactional(timeout = 2, readOnly = true)
+  public Optional<Client> findById(ClientId clientId) {
+    log.debug("Querying client by client id");
+    return jpaClientRepository
+        .findById(clientId.getValue().toString())
+        .map(clientDataAccessMapper::toDomain);
+  }
+
+  /**
+   * Finds all public and private clients belonging to a specific tenant created by a specific user,
+   * with pagination support.
+   *
+   * @param tenantId the tenant ID to which the clients belong.
+   * @param creatorId the user ID of the creator.
+   * @param limit the maximum number of clients to retrieve.
+   * @param lastClientId the client cursor for pagination.
+   * @param lastCreatedOn the creation timestamp cursor for pagination.
+   * @return a {@link PageableResponse} containing the clients for the specified tenant and creator.
+   */
+  @Transactional(timeout = 3, readOnly = true)
+  public PageableResponse<Client> findAllByTenantIdAndCreatorId(
+      TenantId tenantId,
+      UserId creatorId,
+      int limit,
+      String lastClientId,
+      ZonedDateTime lastCreatedOn) {
+    var clients =
+        jpaClientRepository.findAllByTenantIdAndCreatedByWithCursor(
+            tenantId.getValue(), creatorId.getValue(), lastCreatedOn, limit + 1);
+    var lastClient = clients.size() > limit ? clients.get(limit - 1) : null;
+
+    var data =
+        clients.stream()
+            .limit(limit)
+            .filter(c -> !c.isInvalidated())
+            .map(clientDataAccessMapper::toDomain)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+
+    var builder =
+        PageableResponse.<Client>builder()
+            .lastClientId(lastClient == null ? null : lastClient.getClientId())
+            .lastCreatedOn(lastClient == null ? null : lastClient.getCreatedOn())
+            .limit(limit)
+            .data(data);
+
+    return builder.build();
+  }
+
+  /**
+   * Finds all clients associated with a tenant ID, with pagination support.
+   *
+   * @param tenantId the tenant ID
+   * @param limit the maximum number of clients to retrieve
+   * @param lastClientId the ID of the last client retrieved in the previous page (for cursor-based
+   *     pagination)
+   * @param lastCreatedOn the creation timestamp of the last client retrieved in the previous page
+   * @return a {@link PageableResponse} containing the retrieved clients and pagination metadata
+   */
+  @Transactional(timeout = 3, readOnly = true)
+  public PageableResponse<Client> findAllByTenantId(
+      TenantId tenantId, int limit, String lastClientId, ZonedDateTime lastCreatedOn) {
+    log.debug("Querying clients by tenant id with pagination");
+    var clients =
+        jpaClientRepository.findAllByTenantIdWithCursor(
+            tenantId.getValue(), lastCreatedOn, limit + 1);
+    var lastClient = clients.size() > limit ? clients.get(limit - 1) : null;
+
+    var data =
+        clients.stream()
+            .limit(limit)
+            .filter(c -> !c.isInvalidated())
+            .map(clientDataAccessMapper::toDomain)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+
+    var builder =
+        PageableResponse.<Client>builder()
+            .lastClientId(lastClient == null ? null : lastClient.getClientId())
+            .lastCreatedOn(lastClient == null ? null : lastClient.getCreatedOn())
+            .limit(limit)
+            .data(data);
+
+    return builder.build();
+  }
+
+  /**
+   * Finds a client by its client ID and tenant ID.
+   *
+   * @param clientId the unique identifier of the client
+   * @param tenantId the tenant ID associated with the client
+   * @return an {@link Optional} containing the found client if it exists, or empty otherwise
+   */
+  @Transactional(timeout = 2, readOnly = true)
+  public Optional<Client> findByClientIdAndTenantId(ClientId clientId, TenantId tenantId) {
+    log.debug("Querying client by client id and tenant id");
+    return jpaClientRepository
+        .findByClientIdAndTenantId(clientId.getValue().toString(), tenantId.getValue())
+        .map(clientDataAccessMapper::toDomain);
+  }
+
+  /**
+   * Finds a client by its unique client ID, tenant ID, and creator's user ID.
+   *
+   * @param clientId the unique client ID.
+   * @param tenantId the tenant ID to which the client belongs.
+   * @param creatorId the user ID of the creator.
+   * @return an {@link Optional} containing the client if found, or an empty {@link Optional} if not
+   *     found.
+   */
+  @Transactional(timeout = 2, readOnly = true)
+  public Optional<Client> findByClientIdAndTenantIdAndCreatorId(
+      ClientId clientId, TenantId tenantId, UserId creatorId) {
+    return jpaClientRepository
+        .findByClientIdAndTenantIdAndCreatedBy(
+            clientId.getValue().toString(), tenantId.getValue(), creatorId.getValue())
+        .map(clientDataAccessMapper::toDomain);
+  }
+
+  /**
+   * Finds all clients by a list of client IDs.
+   *
+   * @param clientIds a list of client IDs to query
+   * @return a {@link List} of clients corresponding to the provided IDs
+   */
+  @Transactional(timeout = 2, readOnly = true)
+  public List<Client> findAllByClientIds(List<ClientId> clientIds) {
+    log.debug("Querying all clients by client ids");
+    return jpaClientRepository
+        .findAllByClientIds(clientIds.stream().map(i -> i.getValue().toString()).toList())
+        .stream()
+        .map(clientDataAccessMapper::toDomain)
+        .toList();
+  }
+}

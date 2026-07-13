@@ -1,0 +1,120 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <OutputType>Library</OutputType>
+    <NoWarn>1701;1702;1591</NoWarn>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Grpc">
+      <TreatAsUsed>true</TreatAsUsed>
+    </PackageReference>
+    <PackageReference Include="MySql.Data" />
+    <PackageReference Include="protobuf-net" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\products\ASC.Files\Core\ASC.Files.Core.csproj" />
+    <ProjectReference Include="..\ASC.Data.Storage\ASC.Data.Storage.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Update="BackupResource.Designer.cs">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+    </Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Update="BackupResource.resx">
+      <LastGenOutput>BackupResource.Designer.cs</LastGenOutput>
+      <Generator>ResXFileCodeGenerator</Generator>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.el-GR.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.fr.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.tr.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.az.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.ar-SA.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.bg.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.cs.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.de.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.es.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.fi.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.hy-AM.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.it.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.ja-JP.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.ko-KR.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.lv.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.nl.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.pl.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.pt.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.pt-BR.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.ro.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.ru.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.sk.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.sl.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.sq-AL.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.sr-Cyrl-RS.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.sr-Latn-RS.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.uk-UA.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.vi.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Update="BackupResource.zh-CN.resx">
+      <DependentUpon>BackupResource.resx</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,278 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.AuditTrail.Mappers;
+
+public class MessageMaps
+{
+    public ActionType ActionType { get; }
+    public ProductType ProductType { get; protected set; }
+    public LocationType LocationType { get; }
+    public EntryType EntryType1 { get; }
+    public EntryType EntryType2 { get; }
+
+    public string ActionTextResourceName { get; }
+
+
+    public MessageMaps(string actionTextResourceName,
+        ActionType? actionType = null,
+        ProductType? productType = null,
+        LocationType? moduleType = null,
+        EntryType? entryType1 = null,
+        EntryType? entryType2 = null)
+    {
+        ActionTextResourceName = actionTextResourceName;
+
+        if (actionType.HasValue)
+        {
+            ActionType = actionType.Value;
+        }
+
+        if (productType.HasValue)
+        {
+            ProductType = productType.Value;
+        }
+
+        if (moduleType.HasValue)
+        {
+            LocationType = moduleType.Value;
+        }
+
+        if (entryType1.HasValue)
+        {
+            EntryType1 = entryType1.Value;
+        }
+
+        if (entryType2.HasValue)
+        {
+            EntryType2 = entryType2.Value;
+        }
+    }
+
+    public string GetActionTypeText()
+    {
+        try
+        {
+            return AuditReportResource.ResourceManager.GetString(ActionType + "ActionType");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public string GetActionText()
+    {
+        try
+        {
+            return AuditReportResource.ResourceManager.GetString(ActionTextResourceName);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public string GetLocationText()
+    {
+        try
+        {
+            return AuditReportResource.ResourceManager.GetString(LocationType + "Module");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+internal class MessageMapsDictionary() : IDictionary<MessageAction, MessageMaps>
+{
+    private readonly ProductType _productType;
+    private readonly LocationType _moduleType;
+    private IDictionary<MessageAction, MessageMaps> Actions { get; } = new Dictionary<MessageAction, MessageMaps>();
+
+    public ICollection<MessageAction> Keys => Actions.Keys;
+
+    public ICollection<MessageMaps> Values => Actions.Values;
+
+    public int Count => Actions.Count;
+
+    public bool IsReadOnly => Actions.IsReadOnly;
+
+    public MessageMaps this[MessageAction key]
+    {
+        get => Actions[key];
+        set => Actions[key] = value;
+    }
+
+    public MessageMapsDictionary(ProductType productType, LocationType moduleType) : this()
+    {
+        _productType = productType;
+        _moduleType = moduleType;
+    }
+
+    public void Add(IEnumerable<MessageAction> value)
+    {
+        foreach (var item in value)
+        {
+            Add(item);
+        }
+    }
+
+    public void Add(EntryType key, Dictionary<ActionType, MessageAction[]> value)
+    {
+        foreach (var item in value)
+        {
+            foreach (var messageAction in item.Value)
+            {
+                Add(messageAction, item.Key, key);
+            }
+        }
+    }
+
+    public void Add(EntryType key, Dictionary<ActionType, MessageAction[]> value, Dictionary<ActionType, MessageAction> value1)
+    {
+        foreach (var item in value)
+        {
+            foreach (var messageAction in item.Value)
+            {
+                Add(messageAction, item.Key, key);
+            }
+        }
+
+        Add(key, value1);
+    }
+
+    public void Add(EntryType key, Dictionary<ActionType, MessageAction> value)
+    {
+        foreach (var item in value)
+        {
+            Add(item.Value, item.Key, key);
+        }
+    }
+
+    public void Add(ActionType key, IEnumerable<MessageAction> value)
+    {
+        foreach (var item in value)
+        {
+            Add(item, key);
+        }
+    }
+
+    public void Add(EntryType entryType1, EntryType entryType2, Dictionary<ActionType, MessageAction> value)
+    {
+        foreach (var item in value)
+        {
+            Add(item.Value, item.Key, entryType1, entryType2);
+        }
+    }
+
+    public void Add(EntryType entryType1, EntryType entryType2, Dictionary<ActionType, MessageAction[]> value)
+    {
+        foreach (var item in value)
+        {
+            foreach (var messageAction in item.Value)
+            {
+                Add(messageAction, item.Key, entryType1, entryType2);
+            }
+        }
+    }
+
+    public MessageMapsDictionary Add(MessageAction action,
+        ActionType? actionType = null,
+        EntryType? entryType1 = null,
+        EntryType? entryType2 = null,
+        ProductType? productType = null,
+        LocationType? moduleType = null)
+    {
+        var map = new MessageMaps(action.ToStringFast(), actionType, productType ?? _productType, moduleType ?? _moduleType, entryType1, entryType2);
+        Actions.Add(new KeyValuePair<MessageAction, MessageMaps>(action, map));
+        return this;
+    }
+
+    public bool ContainsKey(MessageAction key)
+    {
+        return Actions.ContainsKey(key);
+    }
+
+    public void Add(MessageAction key, MessageMaps value)
+    {
+        Actions.Add(key, value);
+    }
+
+    public bool Remove(MessageAction key)
+    {
+        return Actions.Remove(key);
+    }
+
+    public bool TryGetValue(MessageAction key, out MessageMaps value)
+    {
+        return Actions.TryGetValue(key, out value);
+    }
+
+    public void Add(KeyValuePair<MessageAction, MessageMaps> item)
+    {
+        Actions.Add(item);
+    }
+
+    public void Clear()
+    {
+        Actions.Clear();
+    }
+
+    public bool Contains(KeyValuePair<MessageAction, MessageMaps> item)
+    {
+        return Actions.Contains(item);
+    }
+
+    public void CopyTo(KeyValuePair<MessageAction, MessageMaps>[] array, int arrayIndex)
+    {
+        Actions.CopyTo(array, arrayIndex);
+    }
+
+    public bool Remove(KeyValuePair<MessageAction, MessageMaps> item)
+    {
+        return Actions.Remove(item);
+    }
+
+    public IEnumerator<KeyValuePair<MessageAction, MessageMaps>> GetEnumerator()
+    {
+        return Actions.GetEnumerator();
+    }
+
+    IEnumerator IEnumerable.GetEnumerator()
+    {
+        return Actions.GetEnumerator();
+    }
+}

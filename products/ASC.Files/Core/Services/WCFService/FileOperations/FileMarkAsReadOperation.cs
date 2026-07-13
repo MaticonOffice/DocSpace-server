@@ -1,0 +1,158 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Files.Services.WCFService.FileOperations;
+
+[ProtoContract]
+public record FileMarkAsReadOperationData<T> : FileOperationData<T>
+{
+    public FileMarkAsReadOperationData()
+    {
+
+    }
+
+    public FileMarkAsReadOperationData(IEnumerable<T> Folders,
+        IEnumerable<T> Files,
+        int TenantId,
+        Guid UserId,
+        IDictionary<string, string> Headers,
+        ExternalSessionSnapshot SessionSnapshot,
+        bool HoldResult = true) : base(Folders, Files, TenantId, UserId, Headers, SessionSnapshot, HoldResult)
+    {
+    }
+}
+
+[Transient]
+public class FileMarkAsReadOperation : ComposeFileOperation<FileMarkAsReadOperationData<string>, FileMarkAsReadOperationData<int>>
+{
+    public override FileOperationType FileOperationType { get; set; } = FileOperationType.MarkAsRead;
+
+    public FileMarkAsReadOperation() { }
+
+    public FileMarkAsReadOperation(IServiceProvider serviceProvider) : base(serviceProvider) { }
+
+    public override Task RunJob(CancellationToken cancellationToken)
+    {
+        DaoOperation = new FileMarkAsReadOperation<int>(_serviceProvider, Data);
+        ThirdPartyOperation = new FileMarkAsReadOperation<string>(_serviceProvider, ThirdPartyData);
+
+        return base.RunJob(cancellationToken);
+
+    }
+}
+
+internal class FileMarkAsReadOperation<T> : FileOperation<FileMarkAsReadOperationData<T>, T>
+{
+    private readonly IDictionary<string, StringValues> _headers;
+    public override FileOperationType FileOperationType { get; set; } = FileOperationType.MarkAsRead;
+
+    public FileMarkAsReadOperation(IServiceProvider serviceProvider, FileMarkAsReadOperationData<T> fileOperationData)
+        : base(serviceProvider, fileOperationData)
+    {
+        _headers = fileOperationData.Headers.ToDictionary(x => x.Key, x => new StringValues(x.Value));
+    }
+
+    protected override int InitTotalProgressSteps()
+    {
+        return Files.Count + Folders.Count;
+    }
+
+    protected override async Task DoJob(AsyncServiceScope serviceScope)
+    {
+        var scopeClass = serviceScope.ServiceProvider.GetService<FileMarkAsReadOperationScope>();
+        var filesMessageService = serviceScope.ServiceProvider.GetRequiredService<FilesMessageService>();
+        var fileSecurity = serviceScope.ServiceProvider.GetRequiredService<FileSecurity>();
+        var (fileMarker, globalFolder, daoFactory, settingsManager) = scopeClass;
+        var entries = Enumerable.Empty<FileEntry<T>>();
+        if (Folders.Count > 0)
+        {
+            entries = entries.Concat(await fileSecurity.CanReadAsync(FolderDao.GetFoldersAsync(Folders)).Where(r => r.Item2).Select(r => r.Item1).ToListAsync());
+        }
+        if (Files.Count > 0)
+        {
+            entries = entries.Concat(await fileSecurity.CanReadAsync(FileDao.GetFilesAsync(Files)).Where(r => r.Item2).Select(r => r.Item1).ToListAsync());
+        }
+
+        foreach (var entry in entries)
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+
+            await fileMarker.RemoveMarkAsNewAsync(entry, CurrentUserId);
+
+            if (entry.FileEntryType == FileEntryType.File)
+            {
+                ProcessedFile(((File<T>)entry).Id);
+                await filesMessageService.SendAsync(MessageAction.FileMarkedAsRead, entry, _headers, entry.Title);
+            }
+            else
+            {
+                ProcessedFolder(((Folder<T>)entry).Id);
+                await filesMessageService.SendAsync(MessageAction.FolderMarkedAsRead, entry, _headers, entry.Title);
+            }
+
+            await ProgressStep();
+        }
+
+
+        var rootIds = new List<int>
+            {
+                await globalFolder.GetFolderMyAsync(daoFactory),
+                await globalFolder.GetFolderCommonAsync(daoFactory),
+                await globalFolder.GetFolderShareAsync(daoFactory),
+                await globalFolder.GetFolderProjectsAsync(daoFactory),
+                await globalFolder.GetFolderVirtualRoomsAsync(daoFactory)
+            };
+
+        if (await PrivacyRoomSettings.GetEnabledAsync(settingsManager))
+        {
+            rootIds.Add(await globalFolder.GetFolderPrivacyAsync(daoFactory));
+        }
+
+        var newrootfolder = new List<string>();
+
+        foreach (var r in rootIds.Where(id => id != 0))
+        {
+            var item = new KeyValuePair<int, int>(r, await fileMarker.GetRootFoldersIdMarkedAsNewAsync(r));
+            newrootfolder.Add($"new_{{\"key\"? \"{item.Key}\", \"value\"? \"{item.Value}\"}}");
+        }
+
+        Result += string.Join(SplitChar, newrootfolder.ToArray());
+    }
+}
+
+[Scope]
+public record FileMarkAsReadOperationScope(
+    FileMarker FileMarker,
+    GlobalFolder GlobalFolder,
+    IDaoFactory DaoFactory,
+    SettingsManager SettingsManager);

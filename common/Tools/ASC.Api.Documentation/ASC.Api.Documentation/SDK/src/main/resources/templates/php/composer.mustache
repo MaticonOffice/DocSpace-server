@@ -1,0 +1,43 @@
+﻿{
+    "name": "{{{packageName}}}",
+    "type": "library",
+    "version": "{{{packageVersion}}}",
+    "description": "A simple PHP SDK for integrating with the Maticon Office DocSpace API",
+    "keywords": [
+        "maticonoffice",
+        "docspace",
+        "sdk"
+    ],
+    "homepage": "https://www.maticonoffice.ru",
+    "license": "{{{licenseName}}}",
+    "authors": [
+        {
+            "name": "Maticon Office LLC",
+            "homepage": "https://www.maticonoffice.ru"
+        }
+    ],
+    "support": {
+        "issues": "{{repositoryUrl}}/issues",
+        "source": "{{repositoryUrl}}",
+        "email": "support@maticonoffice.ru",
+        "forum": "https://forum.maticonoffice.ru/"
+    },
+    "require": {
+        "php": "^8.1",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "guzzlehttp/guzzle": "^7.3",
+        "guzzlehttp/psr7": "^1.7 || ^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^8.0 || ^9.0",
+        "friendsofphp/php-cs-fixer": "^3.5"
+    },
+    "autoload": {
+        "psr-4": { "{{{escapedInvokerPackage}}}\\" : "{{{srcBasePath}}}/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "{{{escapedInvokerPackage}}}\\Test\\" : "{{{testBasePath}}}/" }
+    }
+}

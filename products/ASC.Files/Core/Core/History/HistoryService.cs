@@ -1,0 +1,181 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.MessagingSystem.EF.Context;
+
+namespace ASC.Files.Core.Core.History;
+
+[Scope]
+public class HistoryService(
+    IDbContextFactory<MessagesContext> dbContextFactory,
+    TenantManager tenantManager)
+{
+    public static HashSet<MessageAction> TrackedActions => [
+        MessageAction.FileCreated,
+        MessageAction.FileUploaded,
+        MessageAction.FileUploadedWithOverwriting,
+        MessageAction.UserFileUpdated,
+        MessageAction.FileRenamed,
+        MessageAction.FileMoved,
+        MessageAction.FileMovedWithOverwriting,
+        MessageAction.FileMovedToTrash,
+        MessageAction.FileCopied,
+        MessageAction.FileCopiedWithOverwriting,
+        MessageAction.FileVersionRemoved,
+        MessageAction.FileDeleted,
+        MessageAction.FileConverted,
+        MessageAction.FileRestoreVersion,
+        MessageAction.FileIndexChanged,
+        MessageAction.FileLocked,
+        MessageAction.FileUnlocked,
+        MessageAction.FileCustomFilterEnabled,
+        MessageAction.FileCustomFilterDisabled,
+        MessageAction.FolderCreated,
+        MessageAction.FolderRenamed,
+        MessageAction.FolderMoved,
+        MessageAction.FolderMovedWithOverwriting,
+        MessageAction.FolderCopied,
+        MessageAction.FolderCopiedWithOverwriting,
+        MessageAction.FolderMovedToTrash,
+        MessageAction.FolderDeleted,
+        MessageAction.FolderIndexChanged,
+        MessageAction.FolderIndexReordered,
+        MessageAction.RoomCreateUser,
+        MessageAction.RoomUpdateAccessForUser,
+        MessageAction.RoomRemoveUser,
+        MessageAction.RoomChangeOwner,
+        MessageAction.RoomGroupAdded,
+        MessageAction.RoomUpdateAccessForGroup,
+        MessageAction.RoomGroupRemove,
+        MessageAction.RoomCreated,
+        MessageAction.RoomCopied,
+        MessageAction.RoomRenamed,
+        MessageAction.AddedRoomTags,
+        MessageAction.DeletedRoomTags,
+        MessageAction.RoomLogoCreated,
+        MessageAction.RoomLogoDeleted,
+        MessageAction.RoomExternalLinkCreated,
+        MessageAction.RoomExternalLinkRenamed,
+        MessageAction.RoomExternalLinkDeleted,
+        MessageAction.RoomExternalLinkRevoked,
+        MessageAction.FormSubmit,
+        MessageAction.FormOpenedForFilling,
+        MessageAction.RoomIndexingEnabled,
+        MessageAction.RoomIndexingDisabled,
+        MessageAction.RoomLifeTimeSet,
+        MessageAction.RoomLifeTimeDisabled,
+        MessageAction.RoomArchived,
+        MessageAction.RoomUnarchived,
+        MessageAction.RoomDenyDownloadEnabled,
+        MessageAction.RoomDenyDownloadDisabled,
+        MessageAction.RoomWatermarkSet,
+        MessageAction.RoomWatermarkDisabled,
+        MessageAction.RoomColorChanged,
+        MessageAction.RoomCoverChanged,
+        MessageAction.RoomIndexExportSaved,
+        MessageAction.RoomInviteResend,
+        MessageAction.FormStartedToFill,
+        MessageAction.FormPartiallyFilled,
+        MessageAction.FormCompletelyFilled,
+        MessageAction.FormStopped,
+        MessageAction.AgentCreated,
+        MessageAction.AgentRenamed,
+        MessageAction.FileSavedButUserQuotaExceeded,
+        MessageAction.FileNotSavedDueToUserQuota,
+        MessageAction.FileSavedButRoomQuotaExceeded,
+        MessageAction.FileNotSavedDueToRoomQuota
+    ];
+
+    private static HashSet<int> FilterFolderActions => [
+        (int)MessageAction.FolderCreated,
+        (int)MessageAction.FolderMovedWithOverwriting,
+        (int)MessageAction.FolderMovedToTrash,
+        (int)MessageAction.FolderRenamed
+    ];
+
+    private static HashSet<int> FilterFileActions => [
+        (int)MessageAction.FileCopied,
+        (int)MessageAction.FileUploaded,
+        (int)MessageAction.FileMoved,
+        (int)MessageAction.FileRenamed,
+        (int)MessageAction.FormSubmit,
+        (int)MessageAction.FormOpenedForFilling,
+        (int)MessageAction.FormStartedToFill,
+        (int)MessageAction.FormPartiallyFilled,
+        (int)MessageAction.FormCompletelyFilled,
+        (int)MessageAction.FormStopped
+    ];
+
+    public async IAsyncEnumerable<Tuple<DbAuditEvent, DbFilesAuditReference>> GetHistoryAsync(
+        FileEntry<int> entry,
+        int offset,
+        int count,
+        bool needFiltering,
+        List<int> filterFolderIds,
+        List<int> filterFilesIds,
+        DateTime? fromDate,
+        DateTime? toDate)
+    {
+        var messageDbContext = await dbContextFactory.CreateDbContextAsync();
+        var tenantId = tenantManager.GetCurrentTenantId();
+
+        var events = needFiltering
+            ? messageDbContext.GetFilteredAuditEventsByReferences(tenantId, entry.Id, (byte)entry.FileEntryType, offset, count, filterFolderIds, filterFilesIds, FilterFolderActions, FilterFileActions, fromDate, toDate)
+            : messageDbContext.GetAuditEventsByReferences(tenantId, entry.Id, (byte)entry.FileEntryType, offset, count, fromDate, toDate);
+
+        await foreach (var e in events)
+        {
+            yield return e;
+        }
+    }
+
+    public async Task<int> GetHistoryCountAsync(
+        int entryId,
+        FileEntryType entryType,
+        bool needFiltering,
+        List<int> filterFolderIds,
+        List<int> filterFilesIds,
+        DateTime? fromDate,
+        DateTime? toDate)
+    {
+        var messageDbContext = await dbContextFactory.CreateDbContextAsync();
+        var tenantId = tenantManager.GetCurrentTenantId();
+
+        if (needFiltering)
+        {
+            return await messageDbContext.GetFilteredAuditEventsByReferencesTotalCount(tenantId, entryId, (byte)entryType, filterFolderIds, filterFilesIds, FilterFolderActions, FilterFileActions, fromDate, toDate);
+        }
+
+        return await messageDbContext.GetAuditEventsByReferencesTotalCount(tenantId, entryId, (byte)entryType, fromDate, toDate);
+    }
+}

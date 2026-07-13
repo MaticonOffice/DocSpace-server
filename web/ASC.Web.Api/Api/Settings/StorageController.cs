@@ -1,0 +1,538 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Amazon;
+
+using ASC.Data.Backup.Services;
+using ASC.Data.Storage.Encryption.IntegrationEvents.Events;
+
+namespace ASC.Web.Api.Controllers.Settings;
+
+public class StorageController(
+    ILoggerFactory loggerFactory,
+        ServiceClient serviceClient,
+        MessageService messageService,
+        SecurityContext securityContext,
+        StudioNotifyService studioNotifyService,
+        TenantManager tenantManager,
+        PermissionContext permissionContext,
+        SettingsManager settingsManager,
+        WebItemManager webItemManager,
+        CoreBaseSettings coreBaseSettings,
+        CommonLinkUtility commonLinkUtility,
+        StorageSettingsHelper storageSettingsHelper,
+        IWebHostEnvironment webHostEnvironment,
+        ConsumerFactory consumerFactory,
+        IFusionCache fusionCache,
+        IEventBus eventBus,
+        EncryptionSettingsHelper encryptionSettingsHelper,
+        BackupService backupService,
+        ICacheNotify<DeleteSchedule> cacheDeleteSchedule,
+        EncryptionWorker encryptionWorker,
+        IDistributedLockProvider distributedLockProvider,
+        TenantExtra tenantExtra)
+    : BaseSettingsController(fusionCache, webItemManager)
+{
+    private readonly ILogger _log = loggerFactory.CreateLogger("ASC.Api");
+
+    /// <remarks>
+    /// Returns a list of all the portal storages.
+    /// </remarks>
+    /// <summary>Get storages</summary>
+    /// <path>api/2.0/settings/storage</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "List of storages with the following parameters", typeof(List<StorageDto>))]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpGet("storage")]
+    public async Task<List<StorageDto>> GetAllStorages()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await tenantExtra.DemandAccessSpacePermissionAsync();
+
+        var current = await settingsManager.LoadAsync<StorageSettings>();
+        var consumers = consumerFactory.GetAll<DataStoreConsumer>();
+        List<StorageDto> result = [];
+        foreach (var consumer in consumers)
+        {
+            result.Add(await StorageDto.StorageWrapperInit(consumer, current));
+        }
+        return result;
+    }
+
+    /// <remarks>
+    /// Returns the storage progress.
+    /// </remarks>
+    /// <summary>Get the storage progress</summary>
+    /// <path>api/2.0/settings/storage/progress</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "Storage progress", typeof(double))]
+    [AllowNotPayment]
+    [HttpGet("storage/progress")]
+    public async Task<double> GetStorageProgress()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        if (!coreBaseSettings.Standalone)
+        {
+            return -1;
+        }
+
+        var tenant = tenantManager.GetCurrentTenant();
+        return serviceClient.GetProgress(tenant.Id);
+    }
+
+    /// <remarks>
+    /// Starts the storage encryption process.
+    /// </remarks>
+    /// <summary>Start the storage encryption process</summary>
+    /// <path>api/2.0/settings/encryption/start</path>
+    [Tags("Settings / Encryption")]
+    [SwaggerResponse(200, "Boolean value: true if the operation is successful", typeof(bool))]
+    [SwaggerResponse(402, "Your pricing plan does not support this option")]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [SwaggerResponse(405, "Method not allowed")]
+    [HttpPost("encryption/start")]
+    public async Task<bool> StartStorageEncryption(StorageEncryptionRequestsDto inDto)
+    {
+        if (coreBaseSettings.CustomMode)
+        {
+            return false;
+        }
+
+        await using (await distributedLockProvider.TryAcquireFairLockAsync("start_storage_encryption"))
+        {
+            var activeTenants = await tenantManager.GetTenantsAsync();
+
+            if (activeTenants.Count > 0)
+            {
+                await StartEncryptionAsync(inDto.NotifyUsers);
+            }
+        }
+
+        return true;
+    }
+
+    private async Task StartEncryptionAsync(bool notifyUsers)
+    {
+        if (!SetupInfo.IsVisibleSettings<EncryptionSettings>())
+        {
+            throw new NotSupportedException();
+        }
+
+        if (!coreBaseSettings.Standalone)
+        {
+            throw new SecurityException(Resource.ErrorAccessDenied);
+        }
+
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await tenantExtra.DemandAccessSpacePermissionAsync();
+
+        var storages = await GetAllStorages();
+
+        if (storages.Exists(s => s.Current))
+        {
+            throw new NotSupportedException();
+        }
+
+        var cdnStorages = await GetAllCdnStorages();
+
+        if (cdnStorages.Exists(s => s.Current))
+        {
+            throw new NotSupportedException();
+        }
+
+        var tenants = await tenantManager.GetTenantsAsync();
+
+        foreach (var tenant in tenants)
+        {
+            var progress = await backupService.GetBackupProgressAsync(tenant.Id);
+            if (progress is { IsCompleted: false })
+            {
+                throw new Exception();
+            }
+        }
+
+        foreach (var tenant in tenants)
+        {
+            await cacheDeleteSchedule.PublishAsync(new DeleteSchedule { TenantId = tenant.Id }, CacheNotifyAction.Insert);
+        }
+
+        var settings = await encryptionSettingsHelper.LoadAsync();
+
+        settings.NotifyUsers = notifyUsers;
+
+        if (settings.Status == EncryprtionStatus.Decrypted)
+        {
+            settings.Status = EncryprtionStatus.EncryptionStarted;
+            settings.Password = encryptionSettingsHelper.GeneratePassword(32, 16);
+        }
+        else if (settings.Status == EncryprtionStatus.Encrypted)
+        {
+            settings.Status = EncryprtionStatus.DecryptionStarted;
+        }
+
+        messageService.Send(settings.Status == EncryprtionStatus.EncryptionStarted ? MessageAction.StartStorageEncryption : MessageAction.StartStorageDecryption);
+
+        var serverRootPath = commonLinkUtility.GetFullAbsolutePath("~").TrimEnd('/');
+
+        foreach (var tenant in tenants)
+        {
+            tenantManager.SetCurrentTenant(tenant);
+
+            if (notifyUsers)
+            {
+                if (settings.Status == EncryprtionStatus.EncryptionStarted)
+                {
+                    await studioNotifyService.SendStorageEncryptionStartAsync(serverRootPath);
+                }
+                else
+                {
+                    await studioNotifyService.SendStorageDecryptionStartAsync(serverRootPath);
+                }
+            }
+
+            tenant.SetStatus(TenantStatus.Encryption);
+            await tenantManager.SaveTenantAsync(tenant);
+        }
+
+        await encryptionSettingsHelper.SaveAsync(settings);
+
+        await eventBus.PublishAsync(new DataStorageEncryptionIntegrationEvent
+        (
+              encryptionSettings: new EncryptionSettings
+              {
+                  NotifyUsers = settings.NotifyUsers,
+                  Password = settings.Password,
+                  Status = settings.Status
+              },
+              serverRootPath: serverRootPath,
+              createBy: securityContext.CurrentAccount.ID,
+              tenantId: tenantManager.GetCurrentTenantId()
+
+        ));
+    }
+
+    /// <remarks>
+    /// Returns the storage encryption settings.
+    /// </remarks>
+    /// <summary>Get the storage encryption settings</summary>
+    /// <path>api/2.0/settings/encryption/settings</path>
+    [Tags("Settings / Encryption")]
+    [SwaggerResponse(200, "Storage encryption settings", typeof(EncryptionSettings))]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [SwaggerResponse(405, "Method not allowed")]
+    [HttpGet("encryption/settings")]
+    public async Task<EncryptionSettings> GetStorageEncryptionSettings()
+    {
+        try
+        {
+            if (coreBaseSettings.CustomMode)
+            {
+                return null;
+            }
+
+            if (!SetupInfo.IsVisibleSettings<EncryptionSettings>())
+            {
+                throw new NotSupportedException();
+            }
+
+            await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+            await tenantExtra.DemandAccessSpacePermissionAsync();
+
+            var settings = await encryptionSettingsHelper.LoadAsync();
+
+            settings.Password = string.Empty; // Don't show password
+
+            return settings;
+        }
+        catch (Exception e)
+        {
+            _log.ErrorGetStorageEncryptionSettings(e);
+            return null;
+        }
+    }
+
+    /// <remarks>
+    /// Returns the storage encryption progress.
+    /// </remarks>
+    /// <summary>Get the storage encryption progress</summary>
+    /// <path>api/2.0/settings/encryption/progress</path>
+    [Tags("Settings / Encryption")]
+    [SwaggerResponse(200, "Storage encryption progress", typeof(double?))]
+    [SwaggerResponse(405, "Method not allowed")]
+    [HttpGet("encryption/progress")]
+    public async Task<double?> GetStorageEncryptionProgress()
+    {
+        if (coreBaseSettings.CustomMode)
+        {
+            return -1;
+        }
+
+        if (!SetupInfo.IsVisibleSettings<EncryptionSettings>())
+        {
+            throw new NotSupportedException();
+        }
+
+        if (!coreBaseSettings.Standalone)
+        {
+            throw new NotSupportedException();
+        }
+
+        return await encryptionWorker.GetEncryptionProgress();
+    }
+
+    /// <remarks>
+    /// Updates a storage with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>Update a storage</summary>
+    /// <path>api/2.0/settings/storage</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "Updated storage settings", typeof(StorageSettings))]
+    [SwaggerResponse(400, "Module")]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpPut("storage")]
+    public async Task<StorageSettings> UpdateStorage(StorageRequestsDto inDto)
+    {
+        try
+        {
+            await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+            await tenantExtra.DemandAccessSpacePermissionAsync();
+
+            var consumer = consumerFactory.GetByKey(inDto.Module);
+            if (!await consumer.GetIsSetAsync())
+            {
+                throw new ArgumentException("module");
+            }
+
+            var settings = await settingsManager.LoadAsync<StorageSettings>();
+            if (settings.Module == inDto.Module)
+            {
+                return settings;
+            }
+
+            settings.Module = inDto.Module;
+            settings.Props = inDto.Props.ToDictionary(r => r.Key, b => b.Value);
+
+            await StartMigrateAsync(settings);
+            return settings;
+        }
+        catch (Exception e)
+        {
+            _log.ErrorUpdateStorage(e);
+            throw;
+        }
+    }
+
+    /// <remarks>
+    /// Resets the storage settings to the default parameters.
+    /// </remarks>
+    /// <summary>Reset the storage settings</summary>
+    /// <path>api/2.0/settings/storage</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpDelete("storage")]
+    public async Task ResetStorageToDefault()
+    {
+        try
+        {
+            await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+            await tenantExtra.DemandAccessSpacePermissionAsync();
+
+            var settings = await settingsManager.LoadAsync<StorageSettings>();
+
+            settings.Module = null;
+            settings.Props = null;
+
+
+            await StartMigrateAsync(settings);
+        }
+        catch (Exception e)
+        {
+            _log.ErrorResetStorageToDefault(e);
+            throw;
+        }
+    }
+
+    /// <remarks>
+    /// Returns a list of all the CDN storages.
+    /// </remarks>
+    /// <summary>Get the CDN storages</summary>
+    /// <path>api/2.0/settings/storage/cdn</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "List of the CDN storages with the following parameters", typeof(List<StorageDto>))]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpGet("storage/cdn")]
+    public async Task<List<StorageDto>> GetAllCdnStorages()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await tenantExtra.DemandAccessSpacePermissionAsync();
+
+        var current = await settingsManager.LoadAsync<CdnStorageSettings>();
+        var consumers = consumerFactory.GetAll<DataStoreConsumer>().Where(r => r.Cdn != null);
+        List<StorageDto> result = [];
+        foreach (var consumer in consumers)
+        {
+            result.Add(await StorageDto.StorageWrapperInit(consumer, current));
+        }
+        return result;
+    }
+
+    /// <remarks>
+    /// Updates the CDN storage with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>Update the CDN storage</summary>
+    /// <path>api/2.0/settings/storage/cdn</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "Updated CDN storage", typeof(CdnStorageSettings))]
+    [SwaggerResponse(400, "Module")]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpPut("storage/cdn")]
+    public async Task<CdnStorageSettings> UpdateCdnStorage(StorageRequestsDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await tenantExtra.DemandAccessSpacePermissionAsync();
+
+        var consumer = consumerFactory.GetByKey(inDto.Module);
+        if (!await consumer.GetIsSetAsync())
+        {
+            throw new ArgumentException("module");
+        }
+
+        var settings = await settingsManager.LoadAsync<CdnStorageSettings>();
+        if (settings.Module == inDto.Module)
+        {
+            return settings;
+        }
+
+        settings.Module = inDto.Module;
+        settings.Props = inDto.Props.ToDictionary(r => r.Key, b => b.Value);
+
+        try
+        {
+            var tenant = tenantManager.GetCurrentTenant();
+            await serviceClient.UploadCdnAsync(tenant.Id, "/", webHostEnvironment.ContentRootPath, settings);
+        }
+        catch (Exception e)
+        {
+            _log.ErrorUpdateCdn(e);
+            throw;
+        }
+
+        return settings;
+    }
+
+    /// <remarks>
+    /// Resets the CDN storage settings to the default parameters.
+    /// </remarks>
+    /// <summary>Reset the CDN storage settings</summary>
+    /// <path>api/2.0/settings/storage/cdn</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(403, "No permissions to perform this action")]
+    [HttpDelete("storage/cdn")]
+    public async Task ResetCdnToDefault()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await tenantExtra.DemandAccessSpacePermissionAsync();
+
+        await storageSettingsHelper.ClearAsync(await settingsManager.LoadAsync<CdnStorageSettings>());
+    }
+
+    /// <remarks>
+    /// Returns a list of all the backup storages.
+    /// </remarks>
+    /// <summary>Get the backup storages</summary>
+    /// <path>api/2.0/settings/storage/backup</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "List of the backup storages with the following parameters", typeof(List<StorageDto>))]
+    [SwaggerResponse(403, "Access denied")]
+    [HttpGet("storage/backup")]
+    public async Task<List<StorageDto>> GetAllBackupStorages(AllBackupStoragesDto dto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var schedule = await backupService.GetScheduleAsync(dto.Dump);
+        var current = new StorageSettings();
+
+        if (schedule is { StorageType: BackupStorageType.ThirdPartyConsumer })
+        {
+            current = new StorageSettings
+            {
+                Module = schedule.StorageParams["module"],
+                Props = schedule.StorageParams.Where(r => r.Key != "module").ToDictionary(r => r.Key, r => r.Value)
+            };
+        }
+
+        var consumers = consumerFactory.GetAll<DataStoreConsumer>();
+        List<StorageDto> result = [];
+        foreach (var consumer in consumers)
+        {
+            result.Add(await StorageDto.StorageWrapperInit(consumer, current));
+        }
+        return result;
+    }
+
+    private async Task StartMigrateAsync(StorageSettings settings)
+    {
+        var tenant = tenantManager.GetCurrentTenant();
+        await serviceClient.MigrateAsync(tenant.Id, settings);
+
+        tenant.SetStatus(TenantStatus.Migrating);
+        await tenantManager.SaveTenantAsync(tenant);
+    }
+
+    /// <remarks>
+    /// Returns a list of all Amazon regions.
+    /// </remarks>
+    /// <summary>Get Amazon regions</summary>
+    /// <path>api/2.0/settings/storage/s3/regions</path>
+    [Tags("Settings / Storage")]
+    [SwaggerResponse(200, "List of the Amazon regions", typeof(object))]
+    [HttpGet("storage/s3/regions")]
+    public object GetAmazonS3Regions()
+    {
+        return RegionEndpoint.EnumerableAllRegions;
+    }
+}

@@ -1,0 +1,568 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Thirdparty.SharePoint;
+
+[Scope]
+internal class SharePointFolderDao(
+    IDaoFactory daoFactory,
+    IServiceProvider serviceProvider,
+    UserManager userManager,
+    TenantManager tenantManager,
+    TenantUtil tenantUtil,
+    IDbContextFactory<FilesDbContext> dbContextManager,
+    FileUtility fileUtility,
+    CrossDao crossDao,
+    SharePointDaoSelector sharePointDaoSelector,
+    IFileDao<int> fileDao,
+    IFolderDao<int> folderDao,
+    SharePointDaoSelector regexDaoSelectorBase,
+    Global global)
+    : SharePointDaoBase(daoFactory, serviceProvider, userManager, tenantManager, tenantUtil, dbContextManager, fileUtility, regexDaoSelectorBase), IFolderDao<string>
+{
+    private readonly TenantManager _tenantManager1 = tenantManager;
+
+    public async Task<Folder<string>> GetFolderAsync(string folderId)
+    {
+
+        var folder = SharePointProviderInfo.ToFolder(await SharePointProviderInfo.GetFolderByIdAsync(folderId));
+
+        if (folder.FolderType is not (FolderType.CustomRoom or FolderType.PublicRoom))
+        {
+            return folder;
+        }
+
+        var tenantId = _tenantManager1.GetCurrentTenantId();
+        await using var filesDbContext = await _dbContextFactory.CreateDbContextAsync();
+        folder.Shared = await Queries.SharedAsync(filesDbContext, tenantId, folder.Id, FileEntryType.Folder, SubjectType.PrimaryExternalLink);
+
+        return folder;
+    }
+
+    public async Task<Folder<string>> GetFolderAsync(string title, string parentId)
+    {
+        var folderFolders = await SharePointProviderInfo.GetFolderFoldersAsync(parentId);
+
+        return SharePointProviderInfo.ToFolder(folderFolders
+                    .FirstOrDefault(item => item.Name.Equals(title, StringComparison.InvariantCultureIgnoreCase)));
+    }
+
+    public Task<Folder<string>> GetRootFolderAsync(string folderId)
+    {
+        return Task.FromResult(SharePointProviderInfo.ToFolder(SharePointProviderInfo.RootFolder));
+    }
+
+    public Task<Folder<string>> GetRootFolderByFileAsync(string fileId)
+    {
+        return Task.FromResult(SharePointProviderInfo.ToFolder(SharePointProviderInfo.RootFolder));
+    }
+
+    public async IAsyncEnumerable<Folder<string>> GetRoomsAsync(IEnumerable<string> roomsIds, IEnumerable<FilterType> filterTypes, IEnumerable<string> tags, Guid subjectId, string searchText, bool withSubfolders, bool withoutTags, bool excludeSubject, ProviderFilter provider, SubjectFilter? subjectFilter, Guid subjectOwnerId, IEnumerable<string> subjectEntriesIds, IEnumerable<int> parentsIds = null, int? groupId = null)
+    {
+        if (CheckInvalidFilters(filterTypes) || (provider != ProviderFilter.None && provider != SharePointProviderInfo.ProviderFilter))
+        {
+            yield break;
+        }
+
+        var rooms = roomsIds
+            .ToAsyncEnumerable()
+            .Select(async (string e, CancellationToken _) => await GetFolderAsync(e).ConfigureAwait(false));
+
+        rooms = FilterByRoomType(rooms, filterTypes);
+        rooms = FilterBySubject(rooms, subjectId, excludeSubject, subjectFilter, subjectOwnerId, subjectEntriesIds);
+
+        if (!string.IsNullOrEmpty(searchText))
+        {
+            rooms = rooms.Where(x => x.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var filesDbContext = await _dbContextFactory.CreateDbContextAsync();
+        rooms = FilterByTags(rooms, withoutTags, tags, filesDbContext);
+
+        await foreach (var room in rooms)
+        {
+            yield return room;
+        }
+    }
+    public IAsyncEnumerable<Folder<string>> GetFoldersAsync(string parentId, FolderType type)
+    {
+        return GetFoldersAsync(parentId);
+    }
+    public async IAsyncEnumerable<Folder<string>> GetFoldersAsync(string parentId)
+    {
+        var folderFolders = await SharePointProviderInfo.GetFolderFoldersAsync(parentId);
+
+        foreach (var i in folderFolders)
+        {
+            yield return SharePointProviderInfo.ToFolder(i);
+        }
+    }
+
+    public IAsyncEnumerable<Folder<string>> GetFoldersAsync(string parentId, OrderBy orderBy, FilterType filterType, bool subjectGroup, Guid subjectID, string searchText,
+        bool withSubfolders = false, bool excludeSubject = false, int offset = 0, int count = -1, string roomId = null, bool containingMyFiles = false, FolderType parentType = FolderType.DEFAULT, bool containingForms = false)
+    {
+        if (CheckInvalidFilter(filterType))
+        {
+            return AsyncEnumerable.Empty<Folder<string>>();
+        }
+
+        var folders = GetFoldersAsync(parentId);
+
+        //Filter
+        if (subjectID != Guid.Empty)
+        {
+            folders = folders.Where(async (x, _) => subjectGroup
+                                             ? await _userManager.IsUserInGroupAsync(x.CreateBy, subjectID)
+                                             : x.CreateBy == subjectID);
+        }
+
+        if (!string.IsNullOrEmpty(searchText))
+        {
+            folders = folders.Where(x => x.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        orderBy ??= new OrderBy(SortedByType.DateAndTime, false);
+
+        folders = orderBy.SortedBy switch
+        {
+            SortedByType.Author => orderBy.IsAsc ? folders.OrderBy(x => x.CreateBy) : folders.OrderByDescending(x => x.CreateBy),
+            SortedByType.AZ => orderBy.IsAsc ? folders.OrderBy(x => x.Title) : folders.OrderByDescending(x => x.Title),
+            SortedByType.DateAndTime => orderBy.IsAsc ? folders.OrderBy(x => x.ModifiedOn) : folders.OrderByDescending(x => x.ModifiedOn),
+            SortedByType.DateAndTimeCreation => orderBy.IsAsc ? folders.OrderBy(x => x.CreateOn) : folders.OrderByDescending(x => x.CreateOn),
+            _ => orderBy.IsAsc ? folders.OrderBy(x => x.Title) : folders.OrderByDescending(x => x.Title)
+        };
+
+        return folders;
+    }
+
+    public IAsyncEnumerable<Folder<string>> GetFoldersAsync(IEnumerable<string> folderIds, IEnumerable<string> excludeParentIds  = null, FilterType filterType = FilterType.None, bool subjectGroup = false, Guid? subjectID = null, string searchText = "", bool searchSubfolders = false, bool checkShare = true, bool excludeSubject = false)
+    {
+        if (CheckInvalidFilter(filterType))
+        {
+            return AsyncEnumerable.Empty<Folder<string>>();
+        }
+
+        var folders = folderIds.ToAsyncEnumerable().Select(async (string e, CancellationToken _) => await GetFolderAsync(e));
+
+        if (subjectID.HasValue && subjectID != Guid.Empty)
+        {
+            folders = folders.Where(async (x, _) => subjectGroup
+                                             ? await _userManager.IsUserInGroupAsync(x.CreateBy, subjectID.Value)
+                                             : x.CreateBy == subjectID);
+        }
+
+        if (!string.IsNullOrEmpty(searchText))
+        {
+            folders = folders.Where(x => x.Title.Contains(searchText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return folders;
+    }
+
+    public async IAsyncEnumerable<Folder<string>> GetParentFoldersAsync(string folderId)
+    {
+        var path = new List<Folder<string>>();
+        var folder = await SharePointProviderInfo.GetFolderByIdAsync(folderId);
+        if (folder != null)
+        {
+            do
+            {
+                path.Add(SharePointProviderInfo.ToFolder(folder));
+            } while (folder != SharePointProviderInfo.RootFolder && folder is not SharePointFolderErrorEntry &&
+                     (folder = await SharePointProviderInfo.GetParentFolderAsync(folder.ServerRelativeUrl)) != null);
+        }
+        path.Reverse();
+
+        await foreach (var p in path.ToAsyncEnumerable())
+        {
+            yield return p;
+        }
+    }
+
+    public Task<string> SaveFolderAsync(Folder<string> folder, IEnumerable<Folder<string>> children)
+    {
+        throw new NotSupportedException();
+    }
+
+    public async Task<string> SaveFolderAsync(Folder<string> folder)
+    {
+        if (folder.Id != null)
+        {
+            //Create with id
+            var savedfolder = await SharePointProviderInfo.CreateFolderAsync(folder.Id);
+
+            return SharePointProviderInfo.ToFolder(savedfolder).Id;
+        }
+
+        if (folder.ParentId != null)
+        {
+            var parentFolder = await SharePointProviderInfo.GetFolderByIdAsync(folder.ParentId);
+
+            folder.Title = await GetAvailableTitleAsync(folder.Title, parentFolder.ServerRelativeUrl);
+
+            var newFolder = await SharePointProviderInfo.CreateFolderAsync(parentFolder.ServerRelativeUrl + "/" + folder.Title);
+
+            return SharePointProviderInfo.ToFolder(newFolder).Id;
+        }
+
+        return null;
+    }
+
+    public async Task<bool> IsExistAsync(string title, string folder)
+    {
+        var folderFolders = await SharePointProviderInfo.GetFolderFoldersAsync(folder);
+
+        return folderFolders.Any(item => item.Name.Equals(title, StringComparison.InvariantCultureIgnoreCase));
+    }
+
+    public async Task<string> GetAvailableTitleAsync(string requestTitle, string parentFolderId)
+    {
+        return await global.GetAvailableTitleAsync(requestTitle, parentFolderId, IsExistAsync, FileEntryType.Folder);
+    }
+
+    public async Task DeleteFolderAsync(string folderId)
+    {
+        var folder = await SharePointProviderInfo.GetFolderByIdAsync(folderId);
+        var tenantId = _tenantManager1.GetCurrentTenantId();
+        await using var filesDbContext = await _dbContextFactory.CreateDbContextAsync();
+        var strategy = filesDbContext.Database.CreateExecutionStrategy();
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var dbContext = await _dbContextFactory.CreateDbContextAsync();
+            await using var tx = await dbContext.Database.BeginTransactionAsync();
+            var link = await Queries.TagLinksAsync(dbContext, tenantId, folder.ServerRelativeUrl).ToListAsync();
+
+            dbContext.TagLink.RemoveRange(link);
+            await dbContext.SaveChangesAsync();
+
+            var tagsToRemove = await Queries.TagsAsync(dbContext).ToListAsync();
+
+            dbContext.Tag.RemoveRange(tagsToRemove);
+
+            var securityToDelete = await Queries.SecuritiesAsync(dbContext, tenantId, folder.ServerRelativeUrl).ToListAsync();
+
+            dbContext.Security.RemoveRange(securityToDelete);
+            await dbContext.SaveChangesAsync();
+
+            var mappingToDelete = await Queries.ThirdpartyIdMappingsAsync(dbContext, tenantId, folder.ServerRelativeUrl).ToListAsync();
+
+            dbContext.ThirdpartyIdMapping.RemoveRange(mappingToDelete);
+            await dbContext.SaveChangesAsync();
+
+            await tx.CommitAsync();
+        });
+
+
+        await SharePointProviderInfo.DeleteFolderAsync(folderId);
+    }
+
+    public async Task<TTo> MoveFolderAsync<TTo>(string folderId, TTo toFolderId, CancellationToken? cancellationToken)
+    {
+        if (toFolderId is int tId)
+        {
+            return IdConverter.Convert<TTo>(await MoveFolderAsync(folderId, tId, cancellationToken));
+        }
+
+        if (toFolderId is string tsId)
+        {
+            return IdConverter.Convert<TTo>(await MoveFolderAsync(folderId, tsId, cancellationToken));
+        }
+
+        throw new NotImplementedException();
+    }
+
+    public async Task<int> MoveFolderAsync(string folderId, int toFolderId, CancellationToken? cancellationToken)
+    {
+        var moved = await crossDao.PerformCrossDaoFolderCopyAsync(
+                folderId, this, sharePointDaoSelector.GetFileDao(folderId), sharePointDaoSelector.ConvertId,
+                toFolderId, folderDao, fileDao, r => r,
+                true, cancellationToken)
+            ;
+
+        return moved.Id;
+    }
+
+    public async Task<string> MoveFolderAsync(string folderId, string toFolderId, CancellationToken? cancellationToken)
+    {
+        var newFolderId = await SharePointProviderInfo.MoveFolderAsync(folderId, toFolderId);
+        await UpdatePathInDBAsync(SharePointProviderInfo.MakeId(folderId), newFolderId);
+
+        return newFolderId;
+    }
+
+    public async Task<Folder<TTo>> CopyFolderAsync<TTo>(string folderId, TTo toFolderId, CancellationToken? cancellationToken)
+    {
+        if (toFolderId is int tId)
+        {
+            return await CopyFolderAsync(folderId, tId, cancellationToken) as Folder<TTo>;
+        }
+
+        if (toFolderId is string tsId)
+        {
+            return await CopyFolderAsync(folderId, tsId, cancellationToken) as Folder<TTo>;
+        }
+
+        throw new NotImplementedException();
+    }
+
+    public async Task<Folder<string>> CopyFolderAsync(string folderId, string toFolderId, CancellationToken? cancellationToken)
+    {
+        return SharePointProviderInfo.ToFolder(await SharePointProviderInfo.CopyFolderAsync(folderId, toFolderId));
+    }
+
+    public async Task<Folder<int>> CopyFolderAsync(string folderId, int toFolderId, CancellationToken? cancellationToken)
+    {
+        var moved = await crossDao.PerformCrossDaoFolderCopyAsync(
+            folderId, this, sharePointDaoSelector.GetFileDao(folderId), sharePointDaoSelector.ConvertId,
+            toFolderId, folderDao, fileDao, r => r,
+            false, cancellationToken)
+            ;
+
+        return moved;
+    }
+
+    public Task<IDictionary<string, string>> CanMoveOrCopyAsync<TTo>(IEnumerable<string> folderIds, TTo to)
+    {
+        return to switch
+        {
+            int tId => CanMoveOrCopyAsync(folderIds, tId),
+            string tsId => CanMoveOrCopyAsync(folderIds, tsId),
+            _ => throw new NotImplementedException()
+        };
+    }
+
+    public Task<IDictionary<string, string>> CanMoveOrCopyAsync(IEnumerable<string> folderIds, string to)
+    {
+        return Task.FromResult<IDictionary<string, string>>(new Dictionary<string, string>());
+    }
+
+    public Task<IDictionary<string, string>> CanMoveOrCopyAsync(IEnumerable<string> folderIds, int to)
+    {
+        return Task.FromResult<IDictionary<string, string>>(new Dictionary<string, string>());
+    }
+    public async Task<string> UpdateFolderAsync(Folder<string> folder, string newTitle, long newQuota, bool indexing, bool denyDownload, RoomDataLifetime lifeTime, WatermarkSettings watermark, string color, string cover, ChatSettings chatSettings = null, bool? sendFormToExternalDB = null, bool? saveFormAsXLSX = null)
+    {
+        return await RenameFolderAsync(folder, newTitle);
+    }
+    public Task<string> ChangeFolderTypeAsync(Folder<string> folder, FolderType folderType)
+    {
+        return Task.FromResult<string>(null);
+    }
+    public async Task<string> RenameFolderAsync(Folder<string> folder, string newTitle)
+    {
+        var oldId = SharePointProviderInfo.MakeId(folder.Id);
+        var newFolderId = oldId;
+        if (SharePointProviderInfo.SpRootFolderId.Equals(folder.Id))
+        {
+            //It's root folder
+            await DaoSelector.RenameProviderAsync(SharePointProviderInfo, newTitle);
+            //rename provider customer title
+        }
+        else
+        {
+            newFolderId = (string)await SharePointProviderInfo.RenameFolderAsync(folder.Id, newTitle);
+
+            if (SharePointProviderInfo.FolderType.IsRoom() && SharePointProviderInfo.FolderId != null)
+            {
+                await DaoSelector.RenameRoomProviderAsync(SharePointProviderInfo, newTitle, newFolderId);
+            }
+        }
+
+        await UpdatePathInDBAsync(oldId, newFolderId);
+
+        return newFolderId;
+    }
+
+
+    public Task<int> GetItemsCountAsync(string folderId)
+    {
+        throw new NotImplementedException();
+    }
+
+    public async Task<bool> IsEmptyAsync(string folderId)
+    {
+        var folder = await SharePointProviderInfo.GetFolderByIdAsync(folderId);
+
+        return folder.ItemCount == 0;
+    }
+
+    public bool UseTrashForRemoveAsync(Folder<string> folder)
+    {
+        return false;
+    }
+
+    public bool UseRecursiveOperation<TTo>(string folderId, TTo toRootFolderId)
+    {
+        return false;
+    }
+
+    public bool UseRecursiveOperation(string folderId, int toRootFolderId)
+    {
+        return false;
+    }
+
+    public bool UseRecursiveOperation(string folderId, string toRootFolderId)
+    {
+        return false;
+    }
+
+    public bool CanCalculateSubitems(string entryId)
+    {
+        return false;
+    }
+
+    public Task<long> GetMaxUploadSizeAsync(string folderId, bool chunkedUpload = false)
+    {
+        return Task.FromResult(2L * 1024L * 1024L * 1024L);
+    }
+
+    public Task<IDataWriteOperator> CreateDataWriteOperatorAsync(
+            string folderId,
+            CommonChunkedUploadSession chunkedUploadSession,
+            CommonChunkedUploadSessionHolder sessionHolder)
+    {
+        return Task.FromResult<IDataWriteOperator>(null);
+    }
+
+    public Task<string> GetBackupExtensionAsync(string folderId)
+    {
+        return Task.FromResult("tar.gz");
+    }
+
+    public Task<(string RoomId, string RoomTitle, FolderType)> GetParentRoomInfoFromFileEntryAsync(FileEntry<string> entry)
+    {
+        return Task.FromResult(entry.RootFolderType is not (FolderType.VirtualRooms or FolderType.Archive or FolderType.RoomTemplates)
+            ? (string.Empty, string.Empty, FolderType.DEFAULT)
+            : (ProviderInfo.FolderId, ProviderInfo.CustomerTitle, FolderType.PublicRoom));
+    }
+
+    public Task<Folder<string>> GetFirstParentTypeFromFileEntryAsync(FileEntry<string> entry)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<int> SetCustomOrder(string folderId, string parentFolderId, int order)
+    {
+        return Task.FromResult(0);
+    }
+
+    public Task InitCustomOrder(Dictionary<string, int> folderIds, string parentFolderId)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task<string> SetWatermarkSettings(WatermarkSettings watermarkSettings, Folder<string> folder)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<WatermarkSettings> GetWatermarkSettings(Folder<string> room)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<Folder<string>> DeleteWatermarkSettings(Folder<string> room)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<Folder<string>> DeleteLifetimeSettings(Folder<string> room)
+    {
+        throw new NotImplementedException();
+    }
+
+    public IAsyncEnumerable<Folder<string>> GetFoldersByTagAsync(Guid tagOwner, IEnumerable<TagType> tagType, FilterType filterType, bool subjectGroup, Guid subjectId, string searchText, bool excludeSubject, Location? location, int trashId, OrderBy orderBy, int offset, int count)
+    {
+        throw new NotImplementedException();
+    }
+
+    public Task<int> GetFoldersByTagCountAsync(Guid tagOwner, IEnumerable<TagType> tagType, FilterType filterType, bool subjectGroup, Guid subjectId,
+        string searchText, bool excludeSubject, Location? location, int trashId)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+static file class Queries
+{
+    public static readonly Func<FilesDbContext, int, string, IAsyncEnumerable<DbFilesTagLink>> TagLinksAsync =
+        EF.CompileAsyncQuery(
+            (FilesDbContext ctx, int tenantId, string idStart) =>
+                ctx.TagLink
+                    .Where(r => r.TenantId == tenantId)
+                    .Where(r => ctx.ThirdpartyIdMapping
+                        .Where(m => m.TenantId == tenantId)
+                        .Where(m => m.Id.StartsWith(idStart))
+                        .Select(m => m.HashId).Any(h => h == r.EntryId)));
+
+    public static readonly Func<FilesDbContext, IAsyncEnumerable<DbFilesTag>> TagsAsync =
+        EF.CompileAsyncQuery(
+            (FilesDbContext ctx) =>
+                from ft in ctx.Tag
+                join ftl in ctx.TagLink.DefaultIfEmpty() on new { ft.TenantId, ft.Id } equals new
+                {
+                    ftl.TenantId,
+                    Id = ftl.TagId
+                }
+                where ftl == null
+                select ft);
+
+    public static readonly Func<FilesDbContext, int, string, IAsyncEnumerable<DbFilesSecurity>> SecuritiesAsync =
+        EF.CompileAsyncQuery(
+            (FilesDbContext ctx, int tenantId, string idStart) =>
+                ctx.Security
+                    .Where(r => r.TenantId == tenantId)
+                    .Where(r => ctx.ThirdpartyIdMapping
+                        .Where(m => m.TenantId == tenantId)
+                        .Where(m => m.Id.StartsWith(idStart))
+                        .Select(m => m.HashId).Any(h => h == r.EntryId)));
+
+    public static readonly Func<FilesDbContext, int, string, IAsyncEnumerable<DbFilesThirdpartyIdMapping>>
+        ThirdpartyIdMappingsAsync =
+            EF.CompileAsyncQuery(
+                (FilesDbContext ctx, int tenantId, string idStart) =>
+                    ctx.ThirdpartyIdMapping
+                        .Where(r => r.TenantId == tenantId)
+                        .Where(m => m.Id.StartsWith(idStart)));
+
+    public static readonly Func<FilesDbContext, int, string, FileEntryType, SubjectType, Task<bool>>
+        SharedAsync =
+            EF.CompileAsyncQuery(
+                (FilesDbContext ctx, int tenantId, string entryId, FileEntryType entryType, SubjectType subjectType) =>
+                    ctx.Security
+                        .Where(t => t.TenantId == tenantId && t.EntryType == entryType && t.SubjectType == subjectType)
+                        .Join(ctx.ThirdpartyIdMapping, s => s.EntryId, m => m.HashId,
+                            (s, m) => new { s, m.Id })
+                        .Any(r => r.Id == entryId));
+}

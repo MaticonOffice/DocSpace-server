@@ -1,0 +1,153 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core.EF;
+
+public class DbFilesTagLink : BaseEntity, IDbFile
+{
+    public int TenantId { get; set; }
+    public int TagId { get; set; }
+    public FileEntryType EntryType { get; set; }
+    [MaxLength(32)]
+    public string EntryId { get; set; }
+    public Guid? CreateBy { get; set; }
+    public DateTime? CreateOn { get; set; }
+    public int Count { get; set; }
+
+    public DbTenant Tenant { get; set; }
+
+    public override object[] GetKeys()
+    {
+        return [TenantId, TagId, EntryId, EntryType];
+    }
+}
+
+public static class DbFilesTagLinkExtension
+{
+    public static ModelBuilderWrapper AddDbFilesTagLink(this ModelBuilderWrapper modelBuilder)
+    {
+        modelBuilder.Entity<DbFilesTagLink>().Navigation(e => e.Tenant).AutoInclude(false);
+
+        modelBuilder
+            .Add(MySqlAddDbFilesTagLink, Provider.MySql)
+            .Add(PgSqlAddDbFilesTagLink, Provider.PostgreSql);
+
+        return modelBuilder;
+    }
+
+    extension(ModelBuilder modelBuilder)
+    {
+        public void MySqlAddDbFilesTagLink()
+        {
+            modelBuilder.Entity<DbFilesTagLink>(entity =>
+            {
+                entity.HasKey(e => new { e.TenantId, e.TagId, e.EntryId, e.EntryType })
+                    .HasName("PRIMARY");
+
+                entity.ToTable("files_tag_link")
+                    .HasCharSet("utf8");
+
+                entity.HasIndex(e => e.CreateOn)
+                    .HasDatabaseName("create_on");
+
+                entity.HasIndex(e => new { e.TenantId, e.EntryId, e.EntryType })
+                    .HasDatabaseName("entry_id");
+
+                entity.Property(e => e.TenantId).HasColumnName("tenant_id");
+
+                entity.Property(e => e.TagId).HasColumnName("tag_id");
+
+                entity.Property(e => e.EntryId)
+                    .HasColumnName("entry_id")
+                    .HasColumnType("varchar")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.EntryType).HasColumnName("entry_type");
+
+                entity.Property(e => e.CreateBy)
+                    .HasColumnName("create_by")
+                    .HasColumnType("char(38)")
+                    .HasCharSet("utf8")
+                    .UseCollation("utf8_general_ci");
+
+                entity.Property(e => e.CreateOn)
+                    .HasColumnName("create_on")
+                    .HasColumnType("datetime");
+
+                entity.Property(e => e.Count)
+                    .HasColumnName("tag_count")
+                    .HasDefaultValueSql("'0'");
+            });
+        }
+
+        public void PgSqlAddDbFilesTagLink()
+        {
+            modelBuilder.Entity<DbFilesTagLink>(entity =>
+            {
+                entity.HasKey(e => new { e.TenantId, e.TagId, e.EntryId, e.EntryType })
+                    .HasName("pk_files_tag_link");
+
+                entity.ToTable("files_tag_link");
+
+                entity.HasIndex(e => e.CreateOn)
+                    .HasDatabaseName("idx_create_on");
+
+                entity.HasIndex(e => new { e.TenantId, e.EntryId, e.EntryType })
+                    .HasDatabaseName("idx_entry_id");
+
+                entity.Property(e => e.TenantId).HasColumnName("tenant_id");
+
+                entity.Property(e => e.TagId).HasColumnName("tag_id");
+
+                entity.Property(e => e.EntryId)
+                    .HasColumnName("entry_id")
+                    .HasColumnType("varchar(32)");
+
+                entity.Property(e => e.EntryType).HasColumnName("entry_type");
+
+                entity.Property(e => e.CreateBy)
+                    .HasColumnName("create_by")
+                    .HasColumnType("uuid");
+
+                entity.Property(e => e.CreateOn)
+                    .HasColumnName("create_on")
+                    .HasColumnType("timestamptz");
+
+                entity.Property(e => e.Count)
+                    .HasColumnName("tag_count")
+                    .HasDefaultValue(0);
+            });
+        }
+    }
+}

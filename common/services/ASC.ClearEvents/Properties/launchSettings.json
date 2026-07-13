@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "applicationUrl": "http://localhost:5027",
+      "environmentVariables": {
+        "$STORAGE_ROOT": "../../../../Data",
+        "log__name": "clearEvents",
+        "log__dir": "../../../../Logs",
+        "core__products__folder": "../../../products",
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

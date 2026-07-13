@@ -1,0 +1,248 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Core.RoomTemplates.Operations;
+
+[Transient]
+public class CreateRoomTemplateOperation : DistributedTaskProgress
+{
+    private Guid _userId;
+    private LogoSettings _logo;
+    private bool _copyLogo;
+    private IEnumerable<string> _tags;
+    private IEnumerable<string> _emails;
+    private IEnumerable<Guid> _groups;
+    private string _title;
+    private string _cover;
+    private string _color;
+    private long? _quota;
+
+    private int _roomId;
+    private int _totalCount;
+    private int _count;
+    private readonly IServiceProvider _serviceProvider;
+    public int TenantId { get; set; }
+
+    public int TemplateId { get; set; }
+
+    public CreateRoomTemplateOperation()
+    {
+
+    }
+
+    public CreateRoomTemplateOperation(IServiceProvider serviceProvider)
+    {
+        _serviceProvider = serviceProvider;
+    }
+
+    public void Init(int tenantId,
+        Guid userId,
+        int roomId,
+        string title,
+        IEnumerable<string> emails,
+        LogoSettings logo,
+        bool copyLogo,
+        IEnumerable<string> tags,
+        IEnumerable<Guid> groups,
+        string cover,
+        string color,
+        long? quota)
+    {
+        TenantId = tenantId;
+        _userId = userId;
+        _roomId = roomId;
+        _logo = logo;
+        _copyLogo = copyLogo;
+        _tags = tags;
+        _emails = emails;
+        _title = title;
+        _groups = groups;
+        _cover = cover;
+        _color = color;
+        _quota = quota;
+        TemplateId = -1;
+    }
+
+    protected override async Task DoJob()
+    {
+        await using var scope = _serviceProvider.CreateAsyncScope();
+        var tenantManager = scope.ServiceProvider.GetService<TenantManager>();
+        var securityContext = scope.ServiceProvider.GetService<SecurityContext>();
+        var fileStorageService = scope.ServiceProvider.GetService<FileStorageService>();
+        var roomLogoManager = scope.ServiceProvider.GetService<RoomLogoManager>();
+        var daoFactory = scope.ServiceProvider.GetService<IDaoFactory>();
+        var logger = scope.ServiceProvider.GetService<ILogger<CreateRoomTemplateOperation>>();
+        var fileDao = daoFactory.GetFileDao<int>();
+        var folderDao = daoFactory.GetFolderDao<int>();
+
+        try
+        {
+            await tenantManager.SetCurrentTenantAsync(TenantId);
+            await securityContext.AuthenticateMeWithoutCookieAsync(_userId);
+
+            LogoRequest dtoLogo = null;
+            if (_logo != null && !_copyLogo)
+            {
+                dtoLogo = new LogoRequest
+                {
+                    TmpFile = _logo.TmpFile,
+                    Height = _logo.Height,
+                    Width = _logo.Width,
+                    X = _logo.X,
+                    Y = _logo.Y
+                };
+            }
+
+            var template = await fileStorageService.CreateRoomTemplateAsync(_roomId, _title, new List<FileShareParams>(), _tags, dtoLogo, _cover, _color);
+            TemplateId = template.Id;
+
+            List<AceWrapper> wrappers = null;
+
+            if (_emails != null)
+            {
+                wrappers = _emails.Select(e => new AceWrapper { Email = e, Access = FileShare.Read }).ToList();
+            }
+            if (_groups != null)
+            {
+                var groupWrappers = _groups.Select(e => new AceWrapper { Id = e, Access = FileShare.Read, SubjectType = SubjectType.Group }).ToList();
+
+                if (wrappers == null)
+                {
+                    wrappers = groupWrappers;
+                }
+                else
+                {
+                    wrappers.AddRange(groupWrappers);
+                }
+            }
+
+            if (wrappers != null)
+            {
+                var aceCollection = new AceCollection<int>
+                {
+                    Files = [],
+                    Folders = [TemplateId],
+                    Aces = wrappers,
+                    Message = string.Empty
+                };
+
+                await fileStorageService.SetAceObjectAsync(aceCollection, false);
+            }
+
+            if (_copyLogo)
+            {
+                try
+                {
+                    var room = await folderDao.GetFolderAsync(_roomId);
+                    if (await roomLogoManager.CopyAsync(room, template))
+                    {
+                        template.SettingsHasLogo = true;
+                        await folderDao.SaveFolderAsync(template);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.WarningCanNotCopyLogo(ex);
+                }
+            }
+
+            _totalCount = await fileDao.GetFilesCountAsync(_roomId, FilterType.None, false, Guid.Empty, string.Empty, null, false, true);
+
+            await CopyFolderContentAsync(_roomId, TemplateId, folderDao, fileDao, logger, true);
+
+            if (_quota.HasValue)
+            {
+                await fileStorageService.FolderQuotaChangeAsync(template.Id, _quota.Value);
+            }
+
+            Percentage = 100;
+            IsCompleted = true;
+        }
+        catch (Exception ex)
+        {
+            logger.ErrorCreateRoomTemplate(ex);
+            Exception = ex;
+            IsCompleted = true;
+            if (TemplateId != -1)
+            {
+                await folderDao.DeleteFolderAsync(TemplateId);
+            }
+        }
+        finally
+        {
+            await PublishChanges();
+        }
+    }
+
+    private async Task PublishAsync()
+    {
+        _count++;
+        Percentage = _count * 0.9 / _totalCount;
+        await PublishChanges();
+    }
+
+    private async Task CopyFolderContentAsync(int sourceFolderId, int targetFolderId, IFolderDao<int> folderDao, IFileDao<int> fileDao, ILogger<CreateRoomTemplateOperation> logger, bool filterRootFolderType)
+    {
+        await foreach (var file in fileDao.GetFilesAsync(sourceFolderId))
+        {
+            try
+            {
+                await fileDao.CopyFileAsync(file, targetFolderId);
+                await PublishAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.WarningCanNotCopyFile(ex);
+            }
+        }
+
+        var subFolders = folderDao.GetFoldersAsync(sourceFolderId);
+        if (filterRootFolderType)
+        {
+            subFolders = subFolders.Where(f => f.FolderType == FolderType.DEFAULT);
+        }
+
+        await foreach (var subFolder in subFolders)
+        {
+            try
+            {
+                var newSubFolder = await folderDao.CopyFolderAsync(subFolder.Id, targetFolderId, CancellationToken);
+                await CopyFolderContentAsync(subFolder.Id, newSubFolder.Id, folderDao, fileDao, logger, false);
+            }
+            catch (Exception ex)
+            {
+                logger.WarningCanNotCopyFolder(ex);
+            }
+        }
+    }
+}

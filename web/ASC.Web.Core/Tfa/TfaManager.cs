@@ -1,0 +1,188 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Constants = ASC.Core.Users.Constants;
+
+namespace ASC.Web.Studio.Core.TFA;
+
+public class BackupCode
+{
+    public bool IsUsed { get; set; }
+
+    public string Code { get; set; }
+
+    public string GetEncryptedCode(InstanceCrypto InstanceCrypto, Signature Signature)
+    {
+        try
+        {
+            return InstanceCrypto.Decrypt(Code);
+        }
+        catch
+        {
+            //support old scheme stored in the DB
+            return Signature.Read<string>(Code);
+        }
+    }
+
+    public async Task SetEncryptedCodeAsync(InstanceCrypto InstanceCrypto, string code)
+    {
+        Code = await InstanceCrypto.EncryptAsync(code);
+    }
+}
+
+[Scope]
+public class TfaManager(
+    SettingsManager settingsManager,
+    SecurityContext securityContext,
+    CookiesManager cookiesManager,
+    SetupInfo setupInfo,
+    Signature signature,
+    InstanceCrypto instanceCrypto,
+    MachinePseudoKeys machinePseudoKeys,
+    ICache cache,
+    TfaAppAuthSettingsHelper tfaAppAuthSettingsHelper,
+    TenantManager tenantManager,
+    CoreSettings coreSettings)
+{
+    private static readonly TwoFactorAuthenticator _tfa = new();
+    private ICache Cache { get; set; } = cache;
+
+    public async Task<SetupCode> GenerateSetupCodeAsync(UserInfo user)
+    {
+        return _tfa.GenerateSetupCode(tenantManager.GetCurrentTenant().GetTenantDomain(coreSettings), user.Email, await GenerateAccessTokenAsync(user), false, 4);
+    }
+
+    public async Task<(bool, string)> ValidateAuthCodeAsync(UserInfo user, string code, bool checkBackup = true, bool isEntryPoint = false, bool session = false)
+    {
+        if (!tfaAppAuthSettingsHelper.IsVisibleSettings
+            || !(await settingsManager.LoadAsync<TfaAppAuthSettings>()).EnableSetting)
+        {
+            return (false, null);
+        }
+
+        if (user == null || Equals(user, Constants.LostUser))
+        {
+            throw new ItemNotFoundException(Resource.ErrorUserNotFound);
+        }
+
+        code = (code ?? "").Trim();
+
+        if (string.IsNullOrEmpty(code))
+        {
+            throw new Exception(Resource.ActivateTfaAppEmptyCode);
+        }
+
+        int.TryParse(Cache.Get<string>("tfa/" + user.Id), out var counter);
+
+        var loginSettings = await settingsManager.LoadAsync<LoginSettings>();
+        var attemptsCount = loginSettings.AttemptCount;
+
+        if (++counter > attemptsCount)
+        {
+            throw new BruteForceCredentialException(Resource.TfaTooMuchError);
+        }
+        Cache.Insert("tfa/" + user.Id, counter.ToString(CultureInfo.InvariantCulture), DateTime.UtcNow.Add(TimeSpan.FromMinutes(1)));
+
+        if (!_tfa.ValidateTwoFactorPIN(await GenerateAccessTokenAsync(user), code))
+        {
+            if (checkBackup && (await TfaAppUserSettings.BackupCodesForUserAsync(settingsManager, user.Id)).Any(x => x.GetEncryptedCode(instanceCrypto, signature) == code && !x.IsUsed))
+            {
+                await TfaAppUserSettings.DisableCodeForUserAsync(settingsManager, instanceCrypto, signature, user.Id, code);
+            }
+            else
+            {
+                throw new ArgumentException(Resource.TfaAppAuthMessageError);
+            }
+        }
+
+        Cache.Insert("tfa/" + user.Id, (counter - 1).ToString(CultureInfo.InvariantCulture), DateTime.UtcNow.Add(TimeSpan.FromMinutes(1)));
+
+        string token = null;
+        
+        if (!securityContext.IsAuthenticated)
+        {
+            var action = isEntryPoint ? MessageAction.LoginSuccessViaApiTfa : MessageAction.LoginSuccesViaTfaApp;
+            token = await cookiesManager.AuthenticateMeAndSetCookiesAsync(user.Id, action, session);
+        }
+
+        if (!await TfaAppUserSettings.EnableForUserAsync(settingsManager, user.Id))
+        {
+            await GenerateBackupCodesAsync();
+            return (true, token);
+        }
+
+        return (false, token);
+    }
+
+    public async Task<IEnumerable<BackupCode>> GenerateBackupCodesAsync()
+    {
+        var count = setupInfo.TfaAppBackupCodeCount;
+        var length = setupInfo.TfaAppBackupCodeLength;
+
+        const string alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890-_";
+
+        var list = new List<BackupCode>();
+
+        for (var i = 0; i < count; i++)
+        {
+            var data = RandomNumberGenerator.GetBytes(length);
+
+            var result = new StringBuilder(length);
+            foreach (var b in data)
+            {
+                result.Append(alphabet[b % alphabet.Length]);
+            }
+
+            var code = new BackupCode();
+            await code.SetEncryptedCodeAsync(instanceCrypto, result.ToString());
+            list.Add(code);
+        }
+        var settings = await settingsManager.LoadForCurrentUserAsync<TfaAppUserSettings>();
+        settings.CodesSetting = list;
+        await settingsManager.SaveForCurrentUserAsync(settings);
+
+        return list;
+    }
+
+    private async Task<string> GenerateAccessTokenAsync(UserInfo user)
+    {
+        var userSalt = await TfaAppUserSettings.GetSaltAsync(settingsManager, user.Id);
+
+        //from Signature.Create
+        var machineSalt = Encoding.UTF8.GetString(machinePseudoKeys.GetMachineConstant());
+        var token = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(userSalt + machineSalt)));
+        var encodedToken = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(token));
+
+        return encodedToken[..10];
+    }
+}

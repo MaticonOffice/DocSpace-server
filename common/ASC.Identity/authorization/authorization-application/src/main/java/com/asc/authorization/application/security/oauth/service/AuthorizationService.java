@@ -1,0 +1,542 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.authorization.application.security.oauth.service;
+
+import static com.asc.authorization.application.security.RegionUtils.JWT_REGION_EXTRACTOR;
+
+import com.asc.authorization.application.configuration.properties.SecurityConfigurationProperties;
+import com.asc.authorization.application.exception.authorization.AuthorizationCleanupException;
+import com.asc.authorization.application.exception.authorization.AuthorizationPersistenceException;
+import com.asc.authorization.application.mapper.AuthorizationMapper;
+import com.asc.authorization.application.security.RegionUtils;
+import com.asc.authorization.application.security.authentication.BasicSignature;
+import com.asc.authorization.data.authorization.entity.AuthorizationEntity;
+import com.asc.authorization.data.authorization.repository.JpaAuthorizationRepository;
+import com.asc.authorization.data.consent.repository.JpaConsentRepository;
+import com.asc.common.messaging.configuration.AuthorizationMessagingConfiguration;
+import com.asc.common.service.transfer.message.RetrieveAuthorizationMessage;
+import com.asc.common.service.transfer.message.SaveAuthorizationMessage;
+import com.asc.common.utilities.crypto.EncryptionService;
+import com.asc.common.utilities.crypto.HashingService;
+import jakarta.servlet.http.Cookie;
+import java.util.Arrays;
+import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
+import org.slf4j.MDC;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.security.oauth2.core.OAuth2AccessToken;
+import org.springframework.security.oauth2.core.OAuth2RefreshToken;
+import org.springframework.security.oauth2.core.endpoint.OAuth2ParameterNames;
+import org.springframework.security.oauth2.server.authorization.OAuth2Authorization;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationCode;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+/**
+ * Service implementation for managing OAuth2 authorizations.
+ *
+ * <p>This service handles saving, retrieving, and deleting OAuth2 authorizations and their
+ * associated tokens. It also manages encryption, hashing, and tenant-specific data during these
+ * operations.
+ */
+@Slf4j
+@Service
+public class AuthorizationService
+    implements OAuth2AuthorizationService, AuthorizationCleanupService {
+  @Value("${spring.application.region}")
+  private String region;
+
+  private static final String CLIENT_STATE_COOKIE = "client_state";
+
+  private final Environment environment;
+
+  private final SecurityConfigurationProperties securityConfigurationProperties;
+  private final PlatformTransactionManager transactionManager;
+
+  @Nullable private final RabbitTemplate rpcRabbitTemplate;
+  @Nullable private final MessageConverter messageConverter;
+
+  private final AuthorizationMapper authorizationMapper;
+  private final EncryptionService encryptionService;
+  private final HashingService hashingService;
+
+  private final JpaConsentRepository jpaConsentRepository;
+  private final JpaAuthorizationRepository jpaAuthorizationRepository;
+  private final RegisteredClientAccessibilityService registeredClientAccessibilityRepository;
+  private final RegisteredClientRepository registeredClientRepository;
+
+  @Autowired
+  public AuthorizationService(
+      Environment environment,
+      SecurityConfigurationProperties securityConfigurationProperties,
+      PlatformTransactionManager transactionManager,
+      @Autowired(required = false) @Qualifier("rpcRabbitTemplate") RabbitTemplate rpcRabbitTemplate,
+      @Autowired(required = false) MessageConverter messageConverter,
+      AuthorizationMapper authorizationMapper,
+      EncryptionService encryptionService,
+      HashingService hashingService,
+      JpaConsentRepository jpaConsentRepository,
+      JpaAuthorizationRepository jpaAuthorizationRepository,
+      RegisteredClientAccessibilityService registeredClientAccessibilityRepository,
+      RegisteredClientRepository registeredClientRepository) {
+    this.environment = environment;
+    this.securityConfigurationProperties = securityConfigurationProperties;
+    this.transactionManager = transactionManager;
+    this.rpcRabbitTemplate = rpcRabbitTemplate;
+    this.messageConverter = messageConverter;
+    this.authorizationMapper = authorizationMapper;
+    this.encryptionService = encryptionService;
+    this.hashingService = hashingService;
+    this.jpaConsentRepository = jpaConsentRepository;
+    this.jpaAuthorizationRepository = jpaAuthorizationRepository;
+    this.registeredClientAccessibilityRepository = registeredClientAccessibilityRepository;
+    this.registeredClientRepository = registeredClientRepository;
+  }
+
+  private void saveRemote(SaveAuthorizationMessage authorizationMessage, String targetRegion) {
+    if (rpcRabbitTemplate == null || messageConverter == null) {
+      log.warn(
+          "RabbitMQ not available, cannot save authorization to remote region: {}", targetRegion);
+      throw new AuthorizationPersistenceException(
+          "RabbitMQ not available for remote region communication");
+    }
+
+    try {
+      MDC.put("id", authorizationMessage.getId());
+      MDC.put("registered_client_id", authorizationMessage.getRegisteredClientId());
+      MDC.put("principal_id", authorizationMessage.getPrincipalId());
+      MDC.put("region", targetRegion);
+      log.info("Saving authorization to remote region");
+
+      var routingKey =
+          AuthorizationMessagingConfiguration.AUTHORIZATION_RPC_ROUTING_KEY_PREFIX + targetRegion;
+      var message = messageConverter.toMessage(authorizationMessage, new MessageProperties());
+
+      var response =
+          rpcRabbitTemplate.sendAndReceive(
+              AuthorizationMessagingConfiguration.AUTHORIZATION_RPC_EXCHANGE, routingKey, message);
+
+      if (response == null)
+        throw new AuthorizationPersistenceException(
+            "Received an empty response when saving to remote region");
+
+      var result = messageConverter.fromMessage(response);
+      if (result instanceof Boolean success && success)
+        log.info("Authorization saved successfully to remote region");
+      else
+        throw new AuthorizationPersistenceException(
+            "Could not persist authorization to a remote region");
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Saves an OAuth2 authorization to the database.
+   *
+   * <p>The authorization is encrypted, hashed, and stored. If the authorization already exists, it
+   * is merged with the new data.
+   *
+   * @param authorization the OAuth2 authorization to save.
+   * @throws AuthorizationPersistenceException if an error occurs while saving.
+   */
+  public void save(OAuth2Authorization authorization) {
+    try {
+      MDC.put("id", authorization.getId());
+      log.info("Saving authorization");
+
+      setClientStateCookie(authorization);
+
+      var signature = getRequestSignature();
+      // TODO: Proper annotations and separate services
+      var isSaaS =
+          Arrays.stream(environment.getActiveProfiles())
+              .anyMatch(profile -> profile.equalsIgnoreCase("saas"));
+
+      var accessToken = authorization.getToken(OAuth2AccessToken.class);
+      var refreshToken = authorization.getToken(OAuth2RefreshToken.class);
+      var authorizationCode = authorization.getToken(OAuth2AuthorizationCode.class);
+      var atoken =
+          accessToken != null
+              ? encryptionService.encrypt(accessToken.getToken().getTokenValue())
+              : null;
+      var rtoken =
+          refreshToken != null
+              ? encryptionService.encrypt(refreshToken.getToken().getTokenValue())
+              : null;
+      var tokenRegion =
+          authorizationCode != null
+              ? RegionUtils.extract(
+                  authorizationCode.getToken().getTokenValue(), JWT_REGION_EXTRACTOR)
+              : refreshToken != null
+                  ? RegionUtils.extract(
+                      refreshToken.getToken().getTokenValue(), JWT_REGION_EXTRACTOR)
+                  : accessToken != null
+                      ? RegionUtils.extract(
+                          accessToken.getToken().getTokenValue(), JWT_REGION_EXTRACTOR)
+                      : Optional.<String>empty();
+
+      if (tokenRegion.isPresent() && !tokenRegion.get().equalsIgnoreCase(region) && isSaaS) {
+        var authorizationMessage = authorizationMapper.toMessage(authorization);
+
+        if (accessToken != null && accessToken.getToken() != null)
+          authorizationMessage.setAccessTokenHash(
+              hashingService.hash(accessToken.getToken().getTokenValue()));
+
+        if (refreshToken != null && refreshToken.getToken() != null)
+          authorizationMessage.setRefreshTokenHash(
+              hashingService.hash(refreshToken.getToken().getTokenValue()));
+
+        if (signature != null && signature.getTenantId() > 0)
+          authorizationMessage.setTenantId(signature.getTenantId());
+        authorizationMessage.setAccessTokenValue(atoken);
+        authorizationMessage.setRefreshTokenValue(rtoken);
+
+        saveRemote(authorizationMessage, tokenRegion.get());
+        return;
+      }
+
+      var template = new TransactionTemplate(transactionManager);
+      template.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+      template.setTimeout(2);
+      template.execute(
+          status -> {
+            try {
+              var existingAuthorizationOpt =
+                  jpaAuthorizationRepository
+                      .findByRegisteredClientIdAndPrincipalIdAndAuthorizationGrantType(
+                          authorization.getRegisteredClientId(),
+                          authorization.getPrincipalName(),
+                          authorization.getAuthorizationGrantType().getValue());
+
+              var mappedAuthorization = authorizationMapper.toEntity(authorization);
+              var entity =
+                  authorizationMapper.merge(
+                      existingAuthorizationOpt.orElseGet(() -> mappedAuthorization),
+                      authorizationMapper.toEntity(authorization));
+
+              if (accessToken != null && accessToken.getToken() != null)
+                entity.setAccessTokenHash(
+                    hashingService.hash(accessToken.getToken().getTokenValue()));
+
+              if (refreshToken != null && refreshToken.getToken() != null)
+                entity.setRefreshTokenHash(
+                    hashingService.hash(refreshToken.getToken().getTokenValue()));
+
+              if (signature != null && signature.getTenantId() > 0)
+                entity.setTenantId(signature.getTenantId());
+              entity.setAccessTokenValue(atoken);
+              entity.setRefreshTokenValue(rtoken);
+
+              jpaAuthorizationRepository.save(entity);
+              log.info("Authorization saved successfully");
+              return null;
+            } catch (Exception ex) {
+              status.setRollbackOnly();
+              throw ex;
+            }
+          });
+    } catch (Exception e) {
+      log.error("Could not save authorization", e);
+      throw new AuthorizationPersistenceException(e);
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Removes an OAuth2 authorization from the database.
+   *
+   * @param authorization the OAuth2 authorization to remove.
+   * @throws AuthorizationCleanupException if an error occurs while removing.
+   */
+  @Transactional(
+      timeout = 2,
+      rollbackFor = {Exception.class})
+  public void remove(OAuth2Authorization authorization) {
+    try {
+      MDC.put("id", authorization.getId());
+      log.info("Removing authorization by id");
+
+      jpaAuthorizationRepository.deleteById(
+          new AuthorizationEntity.AuthorizationId(
+              authorization.getRegisteredClientId(),
+              authorization.getPrincipalName(),
+              authorization.getAuthorizationGrantType().getValue()));
+
+      log.info("Authorization removed successfully");
+    } catch (Exception e) {
+      log.error("Could not remove authorization", e);
+      throw new AuthorizationCleanupException(e);
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Removes all OAuth2 authorizations and consents for a given principal and client.
+   *
+   * @param principalId the ID of the principal whose authorizations are to be removed.
+   * @param clientId the ID of the client whose authorizations are to be removed.
+   */
+  @Transactional(
+      timeout = 2,
+      rollbackFor = {Exception.class})
+  public void remove(String principalId, String clientId) {
+    jpaAuthorizationRepository.deleteAllAuthorizationsByPrincipalIdAndClientId(
+        principalId, clientId);
+    jpaConsentRepository.deleteAllConsentsByPrincipalIdAndClientId(principalId, clientId);
+  }
+
+  /**
+   * Retrieves an OAuth2 authorization by its ID.
+   *
+   * @param id the ID of the authorization.
+   * @return the OAuth2 authorization, or {@code null} if not found.
+   */
+  @Transactional(readOnly = true, timeout = 2)
+  public OAuth2Authorization findById(String id) {
+    MDC.put("id", id);
+    log.info("Retrieving authorization by id");
+
+    try {
+      return jpaAuthorizationRepository
+          .findByAuthorizationId(id)
+          .filter(
+              e ->
+                  registeredClientAccessibilityRepository.validateClientAccessibility(
+                      e.getRegisteredClientId()))
+          .map(
+              entity -> {
+                var accessToken = entity.getAccessTokenValue();
+                var refreshToken = entity.getRefreshTokenValue();
+                if (accessToken != null && !accessToken.isBlank())
+                  entity.setAccessTokenValue(encryptionService.decrypt(accessToken));
+                if (refreshToken != null && !refreshToken.isBlank())
+                  entity.setRefreshTokenValue(encryptionService.decrypt(refreshToken));
+                return authorizationMapper.fromEntity(
+                    entity,
+                    registeredClientRepository.findByClientId(entity.getRegisteredClientId()));
+              })
+          .orElse(null);
+    } catch (Exception e) {
+      log.error("Could not find authorization by id", e);
+      return null;
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Fetches an authorization entity from a remote region via RPC messaging.
+   *
+   * <p>This method extracts the region identifier from the hashed token and sends an RPC request to
+   * the corresponding remote region to retrieve the authorization entity.
+   *
+   * @param hashedToken the hashed token containing a region prefix.
+   * @return an {@link Optional} containing the {@link AuthorizationEntity} if found, or empty if
+   *     the token has no region prefix or the remote region returns no result.
+   */
+  private Optional<AuthorizationEntity> fetchFromRemoteRegion(
+      String hashedToken, String targetRegion) {
+    if (rpcRabbitTemplate == null || messageConverter == null) {
+      log.warn(
+          "RabbitMQ not available, cannot fetch authorization from remote region: {}",
+          targetRegion);
+      return Optional.empty();
+    }
+
+    try {
+      MDC.put("token", hashedToken);
+      MDC.put("region", targetRegion);
+      log.info("Retrieving authorization by hashed token from a remote region");
+
+      var routingKey =
+          AuthorizationMessagingConfiguration.AUTHORIZATION_RPC_ROUTING_KEY_PREFIX + targetRegion;
+
+      var message =
+          messageConverter.toMessage(
+              RetrieveAuthorizationMessage.builder().token(hashedToken).build(),
+              new MessageProperties());
+
+      var response =
+          rpcRabbitTemplate.sendAndReceive(
+              AuthorizationMessagingConfiguration.AUTHORIZATION_RPC_EXCHANGE, routingKey, message);
+
+      if (response == null) {
+        log.warn("Received an empty response from a remote region");
+        return Optional.empty();
+      }
+
+      var data = messageConverter.fromMessage(response);
+      return data instanceof AuthorizationEntity entity ? Optional.of(entity) : Optional.empty();
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Retrieves an OAuth2 authorization by its token.
+   *
+   * <p>For multi-region deployments, if the token's region doesn't match the current region, the
+   * request is forwarded to the appropriate remote region via RPC. The region is extracted from the
+   * JWT's 'region' claim for access tokens, or from the prefix for refresh tokens.
+   *
+   * @param token the token associated with the authorization.
+   * @param tokenType the type of the token (e.g., access token, refresh token).
+   * @return the OAuth2 authorization, or {@code null} if not found.
+   */
+  public OAuth2Authorization findByToken(String token, OAuth2TokenType tokenType) {
+    MDC.put("token", token);
+    log.info("Retrieving authorization by token");
+
+    // TODO: Proper annotations and separate services
+    var isSaaS =
+        Arrays.stream(environment.getActiveProfiles())
+            .anyMatch(profile -> profile.equalsIgnoreCase("saas"));
+
+    var targetRegion = RegionUtils.extract(token, JWT_REGION_EXTRACTOR);
+    var hashedToken =
+        tokenType == null
+                || tokenType.equals(OAuth2TokenType.ACCESS_TOKEN)
+                || tokenType.equals(OAuth2TokenType.REFRESH_TOKEN)
+            ? hashingService.hash(token)
+            : token;
+
+    try {
+      if (targetRegion.isPresent() && !targetRegion.get().equalsIgnoreCase(region) && isSaaS)
+        return fetchFromRemoteRegion(hashedToken, targetRegion.get())
+            .filter(
+                e ->
+                    registeredClientAccessibilityRepository.validateClientAccessibility(
+                        e.getRegisteredClientId()))
+            .map(
+                (entity) -> {
+                  var accessToken = entity.getAccessTokenValue();
+                  var refreshToken = entity.getRefreshTokenValue();
+                  if (accessToken != null && !accessToken.isBlank())
+                    entity.setAccessTokenValue(encryptionService.decrypt(accessToken));
+                  if (refreshToken != null && !refreshToken.isBlank())
+                    entity.setRefreshTokenValue(encryptionService.decrypt(refreshToken));
+                  return authorizationMapper.fromEntity(
+                      entity,
+                      registeredClientRepository.findByClientId(entity.getRegisteredClientId()));
+                })
+            .orElse(null);
+
+      var template = new TransactionTemplate(transactionManager);
+      template.setTimeout(2);
+      return template
+          .execute(
+              status ->
+                  jpaAuthorizationRepository
+                      .findByStateOrAuthorizationCodeValueOrAccessTokenValueOrRefreshTokenValue(
+                          hashedToken))
+          .filter(
+              e ->
+                  registeredClientAccessibilityRepository.validateClientAccessibility(
+                      e.getRegisteredClientId()))
+          .map(
+              (entity) -> {
+                var accessToken = entity.getAccessTokenValue();
+                var refreshToken = entity.getRefreshTokenValue();
+                if (accessToken != null && !accessToken.isBlank())
+                  entity.setAccessTokenValue(encryptionService.decrypt(accessToken));
+                if (refreshToken != null && !refreshToken.isBlank())
+                  entity.setRefreshTokenValue(encryptionService.decrypt(refreshToken));
+                return authorizationMapper.fromEntity(
+                    entity,
+                    registeredClientRepository.findByClientId(entity.getRegisteredClientId()));
+              })
+          .orElse(null);
+    } catch (Exception e) {
+      log.error("Could not find authorization by token", e);
+      return null;
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Sets the client state cookie for the authorization.
+   *
+   * @param authorization the OAuth2 authorization containing the state.
+   */
+  private void setClientStateCookie(OAuth2Authorization authorization) {
+    var ctx = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+    var state = authorization.<String>getAttribute(OAuth2ParameterNames.STATE);
+    if (state != null && !state.isBlank()) {
+      if (ctx == null || ctx.getResponse() == null)
+        throw new IllegalStateException("Request context holder or response is null");
+
+      log.debug("Setting authorization state cookie: {}", state);
+
+      var cookie = new Cookie(CLIENT_STATE_COOKIE, state);
+      cookie.setPath("/");
+      cookie.setMaxAge(60 * 60 * 24 * 365 * 10); // 10 years
+      ctx.getResponse().addCookie(cookie);
+    }
+  }
+
+  /**
+   * Retrieves the tenant signature information from the current request.
+   *
+   * @return the {@link BasicSignature}, or {@code null} if not found.
+   */
+  private BasicSignature getRequestSignature() {
+    var ctx = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+    if (ctx == null) return null;
+
+    var signature =
+        ctx.getRequest().getAttribute(securityConfigurationProperties.getSignatureCookie());
+    if (signature == null) return null;
+
+    return (BasicSignature) signature;
+  }
+}

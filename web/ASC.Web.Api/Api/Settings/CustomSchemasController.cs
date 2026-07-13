@@ -1,0 +1,192 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.Controllers.Settings;
+
+[DefaultRoute("customschemas")]
+[ApiExplorerSettings(IgnoreApi = true)]
+public class CustomSchemasController(
+    MessageService messageService,
+    TenantManager tenantManager,
+    PermissionContext permissionContext,
+    WebItemManager webItemManager,
+    CustomNamingPeople customNamingPeople,
+    IFusionCache fusionCache)
+    : BaseSettingsController(fusionCache, webItemManager)
+{
+    /// <remarks>
+    /// Returns all portal team templates that allow users to name their organization (or group), add members, and define their activities within the portal.
+    /// </remarks>
+    /// <summary>Get team templates</summary>
+    /// <path>api/2.0/settings/customschemas</path>
+    /// <collection>list</collection>
+    [Tags("Settings / Team templates")]
+    [SwaggerResponse(200, "List of team templates with the following parameters", typeof(List<SchemaRequestsDto>))]
+    [HttpGet("")]
+    public async Task<List<SchemaRequestsDto>> GetPeopleSchemas()
+    {
+        return await customNamingPeople.GetSchemas()
+                .ToAsyncEnumerable()
+                .Select(async (KeyValuePair<string, string> r, CancellationToken _) =>
+                {
+                    var names = await customNamingPeople.GetPeopleNamesAsync(r.Key);
+
+                    return new SchemaRequestsDto
+                    {
+                        Id = names.Id,
+                        Name = names.SchemaName,
+                        UserCaption = names.UserCaption,
+                        UsersCaption = names.UsersCaption,
+                        GroupCaption = names.GroupCaption,
+                        GroupsCaption = names.GroupsCaption,
+                        UserPostCaption = names.UserPostCaption,
+                        RegDateCaption = names.RegDateCaption,
+                        GroupHeadCaption = names.GroupHeadCaption,
+                        GuestCaption = names.GuestCaption,
+                        GuestsCaption = names.GuestsCaption
+                    };
+                })
+                .ToListAsync();
+    }
+
+    /// <remarks>
+    /// Saves the names from the team template with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Save the naming settings</summary>
+    /// <path>api/2.0/settings/customschemas</path>
+    [Tags("Settings / Team templates")]
+    [SwaggerResponse(200, "Team template with the following parameters", typeof(SchemaRequestsDto))]
+    [HttpPost("")]
+    public async Task<SchemaRequestsDto> SaveNamingSettings(SchemaBaseRequestsDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        await customNamingPeople.SetPeopleNamesAsync(inDto.Id);
+
+        await tenantManager.SaveTenantAsync(tenantManager.GetCurrentTenant());
+
+        messageService.Send(MessageAction.TeamTemplateChanged);
+
+        var people = new IdRequestDto<string> { Id = inDto.Id };
+
+        return await GetPeopleSchema(people);
+    }
+
+    /// <remarks>
+    /// Creates a custom team template with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>Create a custom team template</summary>
+    /// <path>api/2.0/settings/customschemas</path>
+    [Tags("Settings / Team templates")]
+    [SwaggerResponse(200, "Custom team template with the following parameters", typeof(SchemaRequestsDto))]
+    [SwaggerResponse(400, "Please fill in all fields")]
+    [HttpPut("")]
+    public async Task<SchemaRequestsDto> SaveCustomNamingSettings(SchemaRequestsDto inDto)
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        var usrCaption = (inDto.UserCaption ?? "").Trim();
+        var usrsCaption = (inDto.UsersCaption ?? "").Trim();
+        var grpCaption = (inDto.GroupCaption ?? "").Trim();
+        var grpsCaption = (inDto.GroupsCaption ?? "").Trim();
+        var usrStatusCaption = (inDto.UserPostCaption ?? "").Trim();
+        var regDateCaption = (inDto.RegDateCaption ?? "").Trim();
+        var grpHeadCaption = (inDto.GroupHeadCaption ?? "").Trim();
+        var guestCaption = (inDto.GuestCaption ?? "").Trim();
+        var guestsCaption = (inDto.GuestsCaption ?? "").Trim();
+
+        if (string.IsNullOrEmpty(usrCaption)
+            || string.IsNullOrEmpty(usrsCaption)
+            || string.IsNullOrEmpty(grpCaption)
+            || string.IsNullOrEmpty(grpsCaption)
+            || string.IsNullOrEmpty(usrStatusCaption)
+            || string.IsNullOrEmpty(regDateCaption)
+            || string.IsNullOrEmpty(grpHeadCaption)
+            || string.IsNullOrEmpty(guestCaption)
+            || string.IsNullOrEmpty(guestsCaption))
+        {
+            throw new Exception(Resource.ErrorEmptyFields);
+        }
+
+        var names = new PeopleNamesItem
+        {
+            Id = PeopleNamesItem.CustomID,
+            UserCaption = usrCaption[..Math.Min(30, usrCaption.Length)],
+            UsersCaption = usrsCaption[..Math.Min(30, usrsCaption.Length)],
+            GroupCaption = grpCaption[..Math.Min(30, grpCaption.Length)],
+            GroupsCaption = grpsCaption[..Math.Min(30, grpsCaption.Length)],
+            UserPostCaption = usrStatusCaption[..Math.Min(30, usrStatusCaption.Length)],
+            RegDateCaption = regDateCaption[..Math.Min(30, regDateCaption.Length)],
+            GroupHeadCaption = grpHeadCaption[..Math.Min(30, grpHeadCaption.Length)],
+            GuestCaption = guestCaption[..Math.Min(30, guestCaption.Length)],
+            GuestsCaption = guestsCaption[..Math.Min(30, guestsCaption.Length)]
+        };
+
+        await customNamingPeople.SetPeopleNamesAsync(names);
+
+        await tenantManager.SaveTenantAsync(tenantManager.GetCurrentTenant());
+
+        messageService.Send(MessageAction.TeamTemplateChanged);
+
+        var people = new IdRequestDto<string> { Id = PeopleNamesItem.CustomID };
+        return await GetPeopleSchema(people);
+    }
+
+    /// <remarks>
+    /// Returns a team template by the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get a team template by ID</summary>
+    /// <path>api/2.0/settings/customschemas/{id}</path>
+    [Tags("Settings / Team templates")]
+    [SwaggerResponse(200, "Team template with the following parameters", typeof(SchemaRequestsDto))]
+    [HttpGet("{id}")]
+    public async Task<SchemaRequestsDto> GetPeopleSchema(IdRequestDto<string> inDto)
+    {
+        var names = await customNamingPeople.GetPeopleNamesAsync(inDto.Id);
+        var schemaItem = new SchemaRequestsDto
+        {
+            Id = names.Id,
+            Name = names.SchemaName,
+            UserCaption = names.UserCaption,
+            UsersCaption = names.UsersCaption,
+            GroupCaption = names.GroupCaption,
+            GroupsCaption = names.GroupsCaption,
+            UserPostCaption = names.UserPostCaption,
+            RegDateCaption = names.RegDateCaption,
+            GroupHeadCaption = names.GroupHeadCaption,
+            GuestCaption = names.GuestCaption,
+            GuestsCaption = names.GuestsCaption
+        };
+        return schemaItem;
+    }
+}

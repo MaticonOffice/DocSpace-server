@@ -1,0 +1,725 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.AuditTrail;
+using ASC.AuditTrail.Models;
+using ASC.AuditTrail.Models.Mappings;
+using ASC.Files.Core.Utils;
+
+namespace ASC.Files.Api;
+
+[ConstraintRoute("int")]
+public class FoldersControllerInternal(
+    IDaoFactory daoFactory,
+    FileSecurity fileSecurity,
+    BreadCrumbsManager breadCrumbsManager,
+    FolderContentDtoHelper folderContentDtoHelper,
+    FileStorageService fileStorageService,
+    FileDeleteOperationsManager fileOperationsManager,
+    FileOperationDtoHelper fileOperationDtoHelper,
+    FolderDtoHelper folderDtoHelper,
+    FileDtoHelper fileDtoHelper,
+    PermissionContext permissionContext,
+    FileShareDtoHelper fileShareDtoHelper,
+    HistoryApiHelper historyApiHelper,
+    FormFillingReportCreator formFillingReportCreator,
+    ApiContext apiContext,
+    CsvFileHelper csvFileHelper,
+    CsvFileUploader csvFileUploader,
+    TenantManager tenantManager,
+    CoreBaseSettings coreBaseSettings
+    )
+    : FoldersController<int>(
+        daoFactory,
+        fileSecurity,
+        breadCrumbsManager,
+        folderContentDtoHelper,
+        fileStorageService,
+        fileOperationsManager,
+        fileOperationDtoHelper,
+        folderDtoHelper,
+        fileDtoHelper,
+        permissionContext,
+        fileShareDtoHelper,
+        apiContext)
+{
+    private readonly FileStorageService _fileStorageServiceInternal = fileStorageService;
+    /// <remarks>
+    /// Returns the activity history of a folder with a specified identifier.
+    /// </remarks>
+    /// <summary>
+    /// Get folder history
+    /// </summary>
+    /// <path>api/2.0/files/folder/{folderId}/log</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of actions in the folder", typeof(IAsyncEnumerable<HistoryDto>))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("folder/{folderId:int}/log")]
+    public IAsyncEnumerable<HistoryDto> GetFolderHistory(HistoryFolderRequestDto inDto)
+    {
+        return historyApiHelper.GetFolderHistoryAsync(inDto.FolderId, inDto.FromDate, inDto.ToDate, inDto.StartIndex, inDto.Count);
+    }
+
+    /// <remarks>
+    /// Generates the activity history of a folder.
+    /// </remarks>
+    /// <summary>
+    /// Generates folder history
+    /// </summary>
+    /// <path>api/2.0/files/folder/{folderId}/log/report</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "URL to the report file", typeof(string))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpPost("folder/{folderId:int}/log/report")]
+    public async Task<string> CreateReportFolderHistoryAsync(int folderId)
+    {
+        if (!coreBaseSettings.Standalone
+            && (!SetupInfo.IsVisibleSettings(ManagementType.LoginHistory.ToStringFast())
+        || !(await tenantManager.GetCurrentTenantQuotaAsync()).Audit))
+        {
+            throw new BillingException(Resource.ErrorNotAllowedOption);
+        }
+
+        var history = await historyApiHelper.GetFolderEventsAsync(folderId);
+
+        await using var stream = csvFileHelper.CreateFile(history, new BaseEventMap<AuditEvent>());
+        var reportName = string.Format(AuditReportResource.AuditTrailReportName + ".csv", "room", folderId);
+        var result = await csvFileUploader.UploadFile(stream, reportName);
+
+        return result;
+    }
+
+    /// <remarks>
+    /// Returns the form filter of a folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get folder form filter</summary>
+    /// <path>api/2.0/files/{folderId}/formfilter</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [AllowAnonymous]
+    [SwaggerResponse(200, "Ok", typeof(IEnumerable<FormsItemDto>))]
+    [HttpGet("{folderId:int}/formfilter")]
+    public async Task<IEnumerable<FormsItemDto>> GetFolder(FolderIdRequestDto<int> inDto)
+    {
+        return (await formFillingReportCreator.GetFormsFields(inDto.FolderId)).Select(r => new FormsItemDto(r.Key, r.Type));
+    }
+
+    /// <remarks>
+    /// Triggers asynchronous XLSX report generation for the specified form results folder.
+    /// </remarks>
+    /// <summary>Generate XLSX report by folder</summary>
+    /// <path>api/2.0/files/folder/{folderId}/xlsx</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Ok", typeof(XlsxReportResponseDto))]
+    [SwaggerResponse(403, "You do not have enough permissions to perform this action")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpPost("folder/{folderId:int}/xlsx")]
+    public async Task<XlsxReportResponseDto> GenerateXlsxByFolder(FolderIdRequestDto<int> inDto)
+    {
+        var (task, form, isNewFile) = await _fileStorageServiceInternal.GenerateXlsxByFolderAsync(inDto.FolderId);
+
+        return new XlsxReportResponseDto
+        {
+            Form = await _fileDtoHelper.GetAsync(form),
+            Task = DocumentBuilderTaskDto.Get(task),
+            IsNewFile = isNewFile
+        };
+    }
+}
+
+public class FoldersControllerThirdparty(
+    IDaoFactory daoFactory,
+    FileSecurity fileSecurity,
+    BreadCrumbsManager breadCrumbsManager,
+    FolderContentDtoHelper folderContentDtoHelper,
+    FileStorageService fileStorageService,
+    FileDeleteOperationsManager fileOperationsManager,
+    FileOperationDtoHelper fileOperationDtoHelper,
+    FolderDtoHelper folderDtoHelper,
+    FileDtoHelper fileDtoHelper,
+    PermissionContext permissionContext,
+    FileShareDtoHelper fileShareDtoHelper,
+    ApiContext apiContext)
+    : FoldersController<string>(
+        daoFactory,
+        fileSecurity,
+        breadCrumbsManager,
+        folderContentDtoHelper,
+        fileStorageService,
+        fileOperationsManager,
+        fileOperationDtoHelper,
+        folderDtoHelper,
+        fileDtoHelper,
+        permissionContext,
+        fileShareDtoHelper,
+        apiContext);
+
+public abstract class FoldersController<T>(
+    IDaoFactory daoFactory,
+    FileSecurity fileSecurity,
+    BreadCrumbsManager breadCrumbsManager,
+    FolderContentDtoHelper folderContentDtoHelper,
+    FileStorageService fileStorageService,
+    FileDeleteOperationsManager fileOperationsManager,
+    FileOperationDtoHelper fileOperationDtoHelper,
+    FolderDtoHelper folderDtoHelper,
+    FileDtoHelper fileDtoHelper,
+    PermissionContext permissionContext,
+    FileShareDtoHelper fileShareDtoHelper,
+    ApiContext apiContext)
+    : ApiControllerBase(folderDtoHelper, fileDtoHelper)
+{
+    /// <remarks>
+    /// Creates a new folder with the title specified in the request. The parent folder ID can be also specified.
+    /// </remarks>
+    /// <summary>Create a folder</summary>
+    /// <path>api/2.0/files/folder/{folderId}</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "New folder parameters", typeof(FolderDto<int>))]
+    [HttpPost("folder/{folderId}")]
+    public async Task<FolderDto<T>> CreateFolder(CreateFolderRequestDto<T> inDto)
+    {
+        var folder = await fileStorageService.CreateFolderAsync(inDto.FolderId, inDto.Folder.Title);
+
+        return await _folderDtoHelper.GetAsync(folder);
+    }
+
+    /// <remarks>
+    /// Deletes a folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Delete a folder</summary>
+    /// <path>api/2.0/files/folder/{folderId}</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of file operations", typeof(IAsyncEnumerable<FileOperationDto>))]
+    [HttpDelete("folder/{folderId}")]
+    public async IAsyncEnumerable<FileOperationDto> DeleteFolder(DeleteFolder<T> inDto)
+    {
+        await fileOperationsManager.Publish([inDto.FolderId], [], false, !inDto.Delete.DeleteAfter, inDto.Delete.Immediately);
+
+        foreach (var e in await fileOperationsManager.GetOperationResults())
+        {
+            yield return await fileOperationDtoHelper.GetAsync(e);
+        }
+    }
+
+    /// <remarks>
+    /// Sets the order of a folder with ID specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Set folder order
+    /// </summary>
+    /// <path>api/2.0/files/folder/{folderId}/order</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of file operations", typeof(FolderDto<int>))]
+    [HttpPut("folder/{folderId}/order")]
+    public async Task<FolderDto<T>> SetFolderOrder(OrderFolderRequestDto<T> inDto)
+    {
+        var folder = await fileStorageService.SetFolderOrder(inDto.FolderId, inDto.Order.Order);
+
+        return await _folderDtoHelper.GetAsync(folder);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Get a folder by ID
+    /// </summary>
+    /// <path>api/2.0/files/{folderId}</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [AllowAnonymous]
+    [HttpGet("{folderId}")]
+    public async Task<FolderContentDto<T>> GetFolderByFolderId(GetFolderRequestDto<T> inDto)
+    {
+        var split = inDto.Extension == null ? [] : inDto.Extension.Split(",");
+        FormsItemDto formsItemDto = null;
+        if (!string.IsNullOrEmpty(inDto.FormsItemKey) || !string.IsNullOrEmpty(inDto.FormsItemType))
+        {
+            formsItemDto = new FormsItemDto(inDto.FormsItemKey, inDto.FormsItemType);
+        }
+
+        var folder = await folderContentDtoHelper.GetAsync(inDto.FolderId, inDto.UserIdOrGroupId, inDto.SharedBy, inDto.FilterType, inDto.RoomId, true, inDto.WithSubFolders ?? true, inDto.ExcludeSubject, inDto.ApplyFilterOption, inDto.SearchArea, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text, split, formsItemDto, inDto.Location);
+        return folder.NotFoundIfNull();
+    }
+
+    /// <remarks>
+    /// Returns the detailed information about a folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get folder information</summary>
+    /// <path>api/2.0/files/folder/{folderId}</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder parameters", typeof(FolderDto<int>))]
+    [AllowAnonymous]
+    [HttpGet("folder/{folderId}")]
+    public async Task<FolderDto<T>> GetFolderInfo(FolderIdRequestDto<T> inDto)
+    {
+        var folder = await fileStorageService.GetFolderAsync(inDto.FolderId).NotFoundIfNull("Folder not found");
+
+        return await _folderDtoHelper.GetAsync(folder, contextFolder: folder);
+    }
+
+    /// <remarks>
+    /// Returns a path to the folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get the folder path</summary>
+    /// <path>api/2.0/files/folder/{folderId}/path</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of file entry information", typeof(IAsyncEnumerable<FileEntryBaseDto>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [HttpGet("folder/{folderId}/path")]
+    public async IAsyncEnumerable<FileEntryBaseDto> GetFolderPath(FolderIdRequestDto<T> inDto)
+    {
+        var folderDao = daoFactory.GetFolderDao<T>();
+        var folder = await folderDao.GetFolderAsync(inDto.FolderId);
+
+        if (folder == null)
+        {
+            throw new ItemNotFoundException(FilesCommonResource.ErrorMessage_FolderNotFound);
+        }
+
+        if (!await fileSecurity.CanReadAsync(folder))
+        {
+            throw new InvalidOperationException(FilesCommonResource.ErrorMessage_SecurityException_ReadFolder);
+        }
+
+        var breadCrumbs = await breadCrumbsManager.GetBreadCrumbsAsync(inDto.FolderId);
+
+        foreach (var e in breadCrumbs)
+        {
+            yield return await GetFileEntryWrapperAsync(e);
+        }
+    }
+
+    /// <remarks>
+    /// Returns a list of all the subfolders from a folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get subfolders</summary>
+    /// <path>api/2.0/files/{folderId}/subfolders</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of file entry information", typeof(IAsyncEnumerable<FileEntryBaseDto>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [HttpGet("{folderId}/subfolders")]
+    public async IAsyncEnumerable<FileEntryBaseDto> GetFolders(FolderIdRequestDto<T> inDto)
+    {
+        var folders = await fileStorageService.GetFoldersAsync(inDto.FolderId);
+        foreach (var folder in folders)
+        {
+            yield return await GetFileEntryWrapperAsync(folder);
+        }
+    }
+
+    /// <remarks>
+    /// Returns a list of all the new items from a folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get new folder items</summary>
+    /// <path>api/2.0/files/{folderId}/news</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of file entry information", typeof(IAsyncEnumerable<FileEntryBaseDto>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [HttpGet("{folderId}/news")]
+    public async IAsyncEnumerable<FileEntryBaseDto> GetNewFolderItems(FolderIdRequestDto<T> inDto)
+    {
+        var newItems = await fileStorageService.GetNewItemsAsync(inDto.FolderId);
+
+        foreach (var e in newItems)
+        {
+            yield return await GetFileEntryWrapperAsync(e);
+        }
+    }
+
+    /// <remarks>
+    /// Renames the selected folder with a new title specified in the request.
+    /// </remarks>
+    /// <summary>Rename a folder</summary>
+    /// <path>api/2.0/files/folder/{folderId}</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder parameters", typeof(FolderDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to rename the folder")]
+    [HttpPut("folder/{folderId}")]
+    public async Task<FolderDto<T>> RenameFolder(CreateFolderRequestDto<T> inDto)
+    {
+        var folder = await fileStorageService.FolderRenameAsync(inDto.FolderId, inDto.Folder.Title);
+
+        return await _folderDtoHelper.GetAsync(folder);
+    }
+
+    /// <remarks>
+    /// Returns the used space of files in the root folders.
+    /// </remarks>
+    /// <summary>Get used space of files</summary>
+    /// <path>api/2.0/files/filesusedspace</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Used space of files in the root folders", typeof(FilesStatisticsResultDto))]
+    [HttpGet("filesusedspace")]
+    public async Task<FilesStatisticsResultDto> GetFilesUsedSpace()
+    {
+        await permissionContext.DemandPermissionsAsync(SecurityConstants.EditPortalSettings);
+
+        return await fileStorageService.GetFilesUsedSpace();
+    }
+
+    /// <remarks>
+    /// Creates a primary external link by the identifier specified in the request.
+    /// </remarks>
+    /// <summary>Create primary external link</summary>
+    /// <path>api/2.0/files/folder/{id}/link</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folders security information", typeof(FileShareDto))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [SwaggerResponse(404, "Not Found")]
+    [HttpPost("folder/{id}/link")]
+    public async Task<FileShareDto> CreateFolderPrimaryExternalLink(FolderLinkRequestDto<T> inDto)
+    {
+        var linkAce = await fileStorageService.GetPrimaryExternalLinkAsync(
+            inDto.Id,
+            FileEntryType.Folder,
+            inDto.FolderLink.Access,
+            string.IsNullOrWhiteSpace(inDto.FolderLink.Title) ? null : inDto.FolderLink.Title.Trim(),
+            expirationDate: inDto.FolderLink.ExpirationDate,
+            requiredAuth: inDto.FolderLink.Internal,
+            allowUnlimitedDate: true,
+            denyDownload: inDto.FolderLink.DenyDownload,
+            password: inDto.FolderLink.Password);
+
+        return await fileShareDtoHelper.Get(linkAce);
+    }
+
+    /// <remarks>
+    /// Returns the primary external link by the identifier specified in the request.
+    /// </remarks>
+    /// <summary>Get primary external link</summary>
+    /// <path>api/2.0/files/folder/{id}/link</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder security information", typeof(FileShareDto))]
+    [SwaggerResponse(403, "You don't have enough permission to perform the operation")]
+    [SwaggerResponse(404, "Not Found")]
+    [AllowAnonymous]
+    [HttpGet("folder/{id}/link")]
+    public async Task<FileShareDto> GetFolderPrimaryExternalLink(FolderPrimaryIdRequestDto<T> inDto)
+    {
+        var linkAce = await fileStorageService.GetPrimaryExternalLinkAsync(inDto.Id, FileEntryType.Folder, allowUnlimitedDate: true);
+
+        return await fileShareDtoHelper.Get(linkAce);
+    }
+
+    /// <remarks>
+    /// Sets the folder external link with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Set the folder external link</summary>
+    /// <path>api/2.0/files/folder/{id}/links</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder information", typeof(FileShareDto))]
+    [HttpPut("folder/{id}/links")]
+    public async Task<FileShareDto> SetFolderPrimaryExternalLink(FolderLinkRequestDto<T> inDto)
+    {
+        var linkAce = await fileStorageService.SetExternalLinkAsync(
+            inDto.Id,
+            FileEntryType.Folder,
+            inDto.FolderLink.LinkId,
+            inDto.FolderLink.Title,
+            inDto.FolderLink.Access,
+            inDto.FolderLink.ExpirationDate,
+            inDto.FolderLink.Password?.Trim(),
+            inDto.FolderLink.DenyDownload,
+            inDto.FolderLink.Internal,
+            inDto.FolderLink.Primary);
+
+        if (linkAce == null)
+        {
+            return null;
+        }
+
+        var result = await fileShareDtoHelper.Get(linkAce);
+
+        if (inDto.FolderLink.LinkId != Guid.Empty && linkAce.Id != inDto.FolderLink.LinkId && result.SharedLink != null)
+        {
+            result.SharedLink.RequestToken = null;
+        }
+
+        return result;
+    }
+
+    /// <remarks>
+    /// Returns the links of the folder with the ID specified in the request.
+    /// </remarks>
+    /// <summary>Get the folder links</summary>
+    /// <path>api/2.0/files/folder/{id}/links</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "Folder security information", typeof(IAsyncEnumerable<FileShareDto>))]
+    [HttpGet("folder/{id}/links")]
+    public async IAsyncEnumerable<FileShareDto> GetFolderLinks(GetFolderLinksRequestDto<T> inDto)
+    {
+        var counter = 0;
+
+        await foreach (var ace in fileStorageService.GetPureSharesAsync(inDto.Id, FileEntryType.Folder, ShareFilterType.ExternalLink, null, 0, 100))
+        {
+            counter++;
+
+            yield return await fileShareDtoHelper.Get(ace);
+        }
+
+        apiContext.SetCount(counter);
+    }
+}
+
+public class FoldersControllerCommon(
+    GlobalFolderHelper globalFolderHelper,
+    FolderContentDtoHelper folderContentDtoHelper,
+    FolderDtoHelper folderDtoHelper,
+    FileDtoHelper fileDtoHelper,
+    UserManager userManager,
+    SecurityContext securityContext,
+    FilesSettingsHelper filesSettingsHelper,
+    SettingsManager settingsManager)
+    : ApiControllerBase(folderDtoHelper, fileDtoHelper)
+{
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "Common" section.
+    /// </remarks>
+    /// <summary>Get the "Common" section</summary>
+    /// <path>api/2.0/files/@common</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Common\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@common")]
+    public async Task<FolderContentDto<int>> GetCommonFolder(GetCommonFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderCommonAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "Favorites" section.
+    /// </remarks>
+    /// <summary>Get the "Favorites" section</summary>
+    /// <path>api/2.0/files/@favorites</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Favorites\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@favorites")]
+    public async Task<FolderContentDto<int>> GetFavoritesFolder(GetCommonFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderFavoritesAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "My documents" section.
+    /// </remarks>
+    /// <summary>Get the "My documents" section</summary>
+    /// <path>api/2.0/files/@my</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"My documents\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@my")]
+    public async Task<FolderContentDto<int>> GetMyFolder(GetMyTrashFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderMyAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, inDto.ApplyFilterOption, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "Private Room" section.
+    /// </remarks>
+    /// <summary>Get the "Private Room" section</summary>
+    /// <path>api/2.0/files/@privacy</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Private Room\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@privacy")]
+    public async Task<FolderContentDto<int>> GetPrivacyFolder(GetCommonFolderRequestDto inDto)
+    {
+        if (PrivacyRoomSettings.IsAvailable())
+        {
+            throw new SecurityException();
+        }
+
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderPrivacyAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "In projects" section.
+    /// </remarks>
+    /// <summary>Get the "In projects" section</summary>
+    /// <path>api/2.0/files/@projects</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"In projects\" section contents", typeof(FolderContentDto<string>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@projects")]
+    public async Task<FolderContentDto<string>> GetProjectsFolder(GetCommonFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.GetFolderProjectsAsync<string>(), inDto.UserIdOrGroupId, null, inDto.FilterType, null, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files located in the "Recent" section.
+    /// </remarks>
+    /// <summary>Get the "Recent" section</summary>
+    /// <path>api/2.0/files/@recent</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Recent\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@recent")]
+    [HttpGet("recent")]
+    public async Task<FolderContentDto<int>> GetRecentFolder(GetRecentFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderRecentAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, inDto.ExcludeSubject, inDto.ApplyFilterOption, inDto.SearchArea, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text, inDto.Extension);
+    }
+
+    /// <remarks>
+    /// Returns all the sections matching the parameters specified in the request.
+    /// </remarks>
+    /// <summary>Get filtered sections</summary>
+    /// <path>api/2.0/files/@root</path>
+    /// <collection>list</collection>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "List of section contents with the following parameters", typeof(IAsyncEnumerable<FolderContentDto<int>>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@root")]
+    public async IAsyncEnumerable<FolderContentDto<int>> GetRootFolders(GetRootFolderRequestDto inDto)
+    {
+        var foldersIds = GetRootFoldersIdsAsync(inDto.WithoutTrash ?? false);
+
+        await foreach (var folder in foldersIds)
+        {
+            yield return await folderContentDtoHelper.GetAsync(folder, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, false, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+        }
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "Shared with me" section.
+    /// </remarks>
+    /// <summary>Get the "Shared with me" section</summary>
+    /// <path>api/2.0/files/@share</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Shared with me\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@share")]
+    public async Task<FolderContentDto<int>> GetShareFolder(GetCommonFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderShareAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files located in the "Templates" section.
+    /// </remarks>
+    /// <summary>Get the "Templates" section</summary>
+    /// <path>api/2.0/files/@templates</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Templates\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@templates")]
+    public async Task<FolderContentDto<int>> GetTemplatesFolder(GetCommonFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(await globalFolderHelper.FolderTemplatesAsync, inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, ApplyFilterOption.All, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    /// <remarks>
+    /// Returns the detailed list of files and folders located in the "Trash" section.
+    /// </remarks>
+    /// <summary>Get the "Trash" section</summary>
+    /// <path>api/2.0/files/@trash</path>
+    [Tags("Files / Folders")]
+    [SwaggerResponse(200, "The \"Trash\" section contents", typeof(FolderContentDto<int>))]
+    [SwaggerResponse(403, "You don't have enough permission to view the folder content")]
+    [SwaggerResponse(404, "The required folder was not found")]
+    [HttpGet("@trash")]
+    public async Task<FolderContentDto<int>> GetTrashFolder(GetMyTrashFolderRequestDto inDto)
+    {
+        return await folderContentDtoHelper.GetAsync(Convert.ToInt32(await globalFolderHelper.FolderTrashAsync), inDto.UserIdOrGroupId, null, inDto.FilterType, 0, true, true, false, inDto.ApplyFilterOption, null, inDto.SortBy, inDto.SortOrder, inDto.StartIndex, inDto.Count, inDto.Text);
+    }
+
+    private async IAsyncEnumerable<int> GetRootFoldersIdsAsync(bool withoutTrash)
+    {
+        var aiAccessSettingsTask = settingsManager.LoadAsync<TenantAiAccessSettings>();
+        var isOutsider = await userManager.IsOutsiderAsync(securityContext.CurrentAccount.ID);
+
+        if (isOutsider)
+        {
+            withoutTrash = true;
+        }
+
+        yield return await globalFolderHelper.FolderFavoritesAsync;
+
+        if (await filesSettingsHelper.GetRecentSection())
+        {
+            yield return await globalFolderHelper.FolderRecentAsync;
+        }
+        yield return await globalFolderHelper.FolderShareAsync;
+
+        var my = await globalFolderHelper.FolderMyAsync;
+        if (my != 0)
+        {
+            yield return my;
+        }
+
+        if (!withoutTrash)
+        {
+            yield return await globalFolderHelper.FolderTrashAsync;
+        }
+
+        yield return await globalFolderHelper.FolderVirtualRoomsAsync;
+        yield return await globalFolderHelper.FolderArchiveAsync;
+
+        var aiAccessSettings = await aiAccessSettingsTask;
+        if (aiAccessSettings.Enabled)
+        {
+            yield return await globalFolderHelper.FolderAiAgentsAsync;
+        }
+    }
+}

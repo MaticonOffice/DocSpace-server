@@ -1,0 +1,83 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Api.ApiModel.ResponseDto;
+
+/// <summary>
+/// The capabilities parameters.
+/// </summary>
+public class CapabilitiesDto
+{
+    /// <summary>
+    /// Specifies if the LDAP settings are enabled or not.
+    /// </summary>
+    /// <example>false</example>
+    public required bool LdapEnabled { get; set; }
+
+    /// <summary>
+    /// The LDAP domain.
+    /// </summary>
+    /// <example>example.com</example>
+    public string LdapDomain { get; set; }
+
+    /// <summary>
+    /// The list of providers.
+    /// </summary>
+    /// <example>["google", "facebook", "microsoft"]</example>
+    public required List<string> Providers { get; set; }
+
+    /// <summary>
+    /// The SP login label.
+    /// </summary>
+    /// <example>Enterprise SSO</example>
+    public required string SsoLabel { get; set; }
+
+    /// <summary>
+    /// Specifies if OAuth is enabled or not.
+    /// </summary>
+    /// <example>true</example>
+    public required bool OauthEnabled { get; init; }
+
+    /// <summary>
+    /// The SSO URL. If this parameter is empty, then the SSO settings are disabled.
+    /// </summary>
+    /// <example>https://sso.example.com/login</example>
+    [Url]
+    public required string SsoUrl { get; set; }
+    
+    /// <summary>
+    /// Specifies if an identity server is enabled or not.
+    /// </summary>
+    /// <example>false</example>
+    public required bool IdentityServerEnabled { get; set; }
+}

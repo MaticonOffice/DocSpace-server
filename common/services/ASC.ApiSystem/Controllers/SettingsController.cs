@@ -1,0 +1,308 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.ApiSystem.Controllers;
+
+[Scope]
+[ApiController]
+[Route("[controller]")]
+[DisableResponseWrapper]
+public class SettingsController(
+        ILogger<SettingsController> logger,
+        CommonMethods commonMethods,
+        CoreSettings coreSettings,
+        CoreBaseSettings coreBaseSettings)
+    : ControllerBase
+{
+
+    #region For TEST api
+
+    /// <remarks>
+    /// Test API.
+    /// </remarks>
+    /// <summary>Test API.</summary>
+    /// <path>apisystem/settings/test</path>
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [SwaggerResponse(200, "Settings api works")]
+    [HttpGet("test")]
+    [AllowAnonymous]
+    public IActionResult Check()
+    {
+        return Ok(new
+        {
+            value = "Settings api works"
+        });
+    }
+
+    #endregion
+
+    #region API methods
+
+    /// <remarks>
+    /// Returns the portal settings by the parameters specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Get settings
+    /// </summary>
+    /// <path>apisystem/settings/get</path>
+    [Tags("Settings")]
+    [SwaggerResponse(200, "Settings", typeof(IActionResult))]
+    [HttpGet("get")]
+    [Authorize(AuthenticationSchemes = "auth:allowskip:default,auth:portal,auth:portalbasic")]
+    public async Task<IActionResult> GetSettingsAsync([FromQuery] SettingsModel model)
+    {
+        if (!coreBaseSettings.Standalone)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new ErrorDto
+            {
+                Error = "error",
+                Message = "Method for server edition only."
+            });
+        }
+
+        var (succ, tenantId, error) = await GetTenantAsync(model);
+        if (!succ)
+        {
+            return BadRequest(error);
+        }
+
+        if (string.IsNullOrEmpty(model.Key))
+        {
+            return BadRequest(new ErrorDto
+            {
+                Error = "params",
+                Message = "Key is required"
+            });
+        }
+
+        var settings = await coreSettings.GetSettingAsync(model.Key, tenantId);
+
+        return Ok(new
+        {
+            settings
+        });
+    }
+
+    /// <remarks>
+    /// Saves the settings specified in the request for the current portal.
+    /// </remarks>
+    /// <summary>
+    /// Save settings
+    /// </summary>
+    /// <path>apisystem/settings/save</path>
+    [Tags("Settings")]
+    [SwaggerResponse(200, "Settings", typeof(IActionResult))]
+    [HttpPost("save")]
+    [Authorize(AuthenticationSchemes = "auth:allowskip:default,auth:portal,auth:portalbasic")]
+    public async Task<IActionResult> SaveSettingsAsync([FromBody] SettingsModel model)
+    {
+        if (!coreBaseSettings.Standalone)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new ErrorDto
+            {
+                Error = "error",
+                Message = "Method for server edition only."
+            });
+        }
+
+        var (succ, tenantId, error) = await GetTenantAsync(model);
+        if (!succ)
+        {
+            return BadRequest(error);
+        }
+
+        if (string.IsNullOrEmpty(model.Key))
+        {
+            return BadRequest(new ErrorDto
+            {
+                Error = "params",
+                Message = "Key is required"
+            });
+        }
+
+        if (string.IsNullOrEmpty(model.Value))
+        {
+            return BadRequest(new ErrorDto
+            {
+                Error = "params",
+                Message = "Value is empty"
+            });
+        }
+
+        if (model.Key.Equals("BaseDomain", StringComparison.InvariantCultureIgnoreCase))
+        {
+            if (Uri.CheckHostName(model.Value) != UriHostNameType.Dns)
+            {
+                return BadRequest(new ErrorDto
+                {
+                    Error = "params",
+                    Message = "BaseDomain is not valid"
+                });
+            }
+        }
+
+        logger.DebugSaveSetting(model.Key, model.Value, tenantId);
+
+        await coreSettings.SaveSettingAsync(model.Key, model.Value, tenantId);
+
+        var settings = await coreSettings.GetSettingAsync(model.Key, tenantId);
+
+        return Ok(new
+        {
+            settings
+        });
+    }
+
+    /// <remarks>
+    /// Checks the domain with the name specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Check the domain name
+    /// </summary>
+    /// <path>apisystem/settings/checkdomain</path>
+    [Tags("Settings")]
+    [SwaggerResponse(200, "True if success", typeof(IActionResult))]
+    [HttpPost("checkdomain")]
+    [Authorize(AuthenticationSchemes = "auth:allowskip:default,auth:portal,auth:portalbasic")]
+    public async Task<IActionResult> CheckDomain([FromBody] DomainModel model)
+    {
+        if (!coreBaseSettings.Standalone)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new ErrorDto
+            {
+                Error = "error",
+                Message = "Method for server edition only."
+            });
+        }
+
+        if (model == null || string.IsNullOrEmpty(model.HostName))
+        {
+            return BadRequest(new ErrorDto
+            {
+                Error = "hostNameEmpty",
+                Message = "HostName is required"
+            });
+        }
+
+        if (Uri.CheckHostName(model.HostName) != UriHostNameType.Dns)
+        {
+            return BadRequest(new ErrorDto
+            {
+                Error = "hostNameInvalid",
+                Message = "HostName is not valid"
+            });
+        }
+
+        try
+        {
+            var currentHostIps = await commonMethods.GetHostIpsAsync();
+
+            var hostIps = (await Dns.GetHostAddressesAsync(model.HostName)).Select(ip => ip.ToString());
+
+            return Ok(new
+            {
+                value = currentHostIps.Any(ip => hostIps.Contains(ip))
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.ErrorCheckDomain(model.HostName, ex);
+
+            return Ok(new
+            {
+                value = false
+            });
+        }
+    }
+
+    #endregion
+
+    #region private methods
+
+    private async Task<(bool, int, ErrorDto)> GetTenantAsync(SettingsModel model)
+    {
+        ErrorDto error;
+        var tenantId = -1;
+
+        if (model == null)
+        {
+            error = new ErrorDto
+            {
+                Error = "portalNameEmpty",
+                Message = "PortalName is required"
+            };
+
+            logger.ErrorModelIsNull();
+
+            return (false, tenantId, error);
+        }
+
+        if (model.TenantId is -1)
+        {
+            tenantId = model.TenantId.Value;
+            return (true, tenantId, null);
+        }
+
+        var (success, tenant) = await commonMethods.TryGetTenantAsync(model);
+        if (!success)
+        {
+            error = new ErrorDto
+            {
+                Error = "portalNameEmpty",
+                Message = "PortalName is required"
+            };
+
+            logger.ErrorModelWithoutTenant();
+
+            return (false, tenantId, error);
+        }
+
+        if (tenant == null)
+        {
+            error = new ErrorDto
+            {
+                Error = "portalNameNotFound",
+                Message = "Portal not found"
+            };
+
+            logger.ErrorTenantNotFound();
+
+            return (false, tenantId, error);
+        }
+
+        tenantId = tenant.Id;
+        return (true, tenantId, null);
+    }
+
+    #endregion
+}

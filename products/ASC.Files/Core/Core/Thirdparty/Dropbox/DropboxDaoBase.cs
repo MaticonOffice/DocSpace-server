@@ -1,0 +1,333 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Files.Thirdparty.Dropbox;
+
+[Scope(typeof(IDaoBase<FileMetadata, FolderMetadata, Metadata>))]
+internal class DropboxDaoBase(
+    IDaoFactory daoFactory,
+    IServiceProvider serviceProvider,
+    UserManager userManager,
+    TenantManager tenantManager,
+    TenantUtil tenantUtil,
+    IDbContextFactory<FilesDbContext> dbContextFactory,
+    FileUtility fileUtility,
+    RegexDaoSelectorBase<FileMetadata, FolderMetadata, Metadata> regexDaoSelectorBase)
+    : ThirdPartyProviderDao<FileMetadata, FolderMetadata, Metadata>(daoFactory, serviceProvider, userManager, tenantManager, tenantUtil, dbContextFactory, fileUtility, regexDaoSelectorBase),
+        IDaoBase<FileMetadata, FolderMetadata, Metadata>
+{
+    private DropboxProviderInfo _providerInfo;
+
+    public void Init(string pathPrefix, IProviderInfo<FileMetadata, FolderMetadata, Metadata> providerInfo)
+    {
+        PathPrefix = pathPrefix;
+        ProviderInfo = providerInfo;
+        _providerInfo = providerInfo as DropboxProviderInfo;
+    }
+
+    public string GetId(Metadata dropboxItem)
+    {
+        string path = null;
+        if (dropboxItem != null)
+        {
+            path = dropboxItem.PathDisplay;
+        }
+
+        return path;
+    }
+
+    public bool IsFile(Metadata dropboxItem)
+    {
+        return dropboxItem.AsFolder == null;
+    }
+
+    public string GetName(Metadata dropboxItem)
+    {
+        string name = null;
+        if (dropboxItem != null)
+        {
+            name = dropboxItem.Name;
+        }
+
+        return name;
+    }
+
+    public string GetParentFolderId(Metadata dropboxItem)
+    {
+        if (dropboxItem == null || IsRoot(dropboxItem.AsFolder))
+        {
+            return null;
+        }
+
+        var pathLength = dropboxItem.PathDisplay.Length - dropboxItem.Name.Length;
+
+        return dropboxItem.PathDisplay[..(pathLength > 1 ? pathLength - 1 : 0)];
+    }
+
+    public string MakeThirdId(object entryId)
+    {
+        var id = Convert.ToString(entryId, CultureInfo.InvariantCulture);
+
+        if (string.IsNullOrEmpty(id) || id.StartsWith('/'))
+        {
+            return id;
+        }
+
+        try
+        {
+            return Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(id));
+        }
+        catch
+        {
+            return id;
+        }
+    }
+
+    public string MakeId(Metadata dropboxItem)
+    {
+        return MakeId(GetId(dropboxItem));
+    }
+
+    public override string MakeId(string path = null)
+    {
+        if (string.IsNullOrEmpty(path) || path == "/")
+        {
+            return PathPrefix;
+        }
+
+        return path.StartsWith('/') ? $"{PathPrefix}-{WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(path))}" : $"{PathPrefix}-{path}";
+    }
+
+    public string MakeFolderTitle(FolderMetadata dropboxFolder)
+    {
+        if (dropboxFolder == null || IsRoot(dropboxFolder))
+        {
+            return ProviderInfo.CustomerTitle;
+        }
+
+        return Global.ReplaceInvalidCharsAndTruncate(dropboxFolder.Name);
+    }
+
+    public string MakeFileTitle(FileMetadata dropboxFile)
+    {
+        if (dropboxFile == null || string.IsNullOrEmpty(dropboxFile.Name))
+        {
+            return ProviderInfo.ProviderKey;
+        }
+
+        return Global.ReplaceInvalidCharsAndTruncate(dropboxFile.Name);
+    }
+
+    public Folder<string> ToFolder(FolderMetadata dropboxFolder)
+    {
+        switch (dropboxFolder)
+        {
+            case null:
+                return null;
+            case ErrorFolder errorFolder:
+                return ToErrorFolder(errorFolder);
+        }
+
+        var isRoot = IsRoot(dropboxFolder);
+
+        var folder = GetFolder();
+
+        folder.Id = MakeId(dropboxFolder);
+        folder.ParentId = isRoot ? null : MakeId(GetParentFolderId(dropboxFolder));
+        folder.CreateOn = isRoot ? ProviderInfo.CreateOn : default;
+        folder.ModifiedOn = isRoot ? ProviderInfo.ModifiedOn : default;
+        folder.Title = MakeFolderTitle(dropboxFolder);
+        folder.SettingsPrivate = ProviderInfo.Private;
+        folder.SettingsHasLogo = ProviderInfo.HasLogo;
+        folder.SettingsColor = ProviderInfo.Color;
+        folder.SettingsCover = ProviderInfo.Cover;
+        
+        ProcessFolderAsRoom(folder);
+
+        if (folder.CreateOn != DateTime.MinValue && folder.CreateOn.Kind == DateTimeKind.Utc)
+        {
+            folder.CreateOn = _tenantUtil.DateTimeFromUtc(folder.CreateOn);
+        }
+
+        if (folder.ModifiedOn != DateTime.MinValue && folder.ModifiedOn.Kind == DateTimeKind.Utc)
+        {
+            folder.ModifiedOn = _tenantUtil.DateTimeFromUtc(folder.ModifiedOn);
+        }
+
+        return folder;
+    }
+
+    public bool IsRoot(FolderMetadata dropboxFolder)
+    {
+        return dropboxFolder is { Id: "/" };
+    }
+
+    private File<string> ToErrorFile(ErrorFile dropboxFile)
+    {
+        if (dropboxFile == null)
+        {
+            return null;
+        }
+
+        var file = GetErrorFile(new ErrorEntry(dropboxFile.ErrorId, dropboxFile.Error));
+
+        file.Title = MakeFileTitle(dropboxFile);
+
+        return file;
+    }
+
+    private Folder<string> ToErrorFolder(ErrorFolder dropboxFolder)
+    {
+        if (dropboxFolder == null)
+        {
+            return null;
+        }
+
+        var folder = GetErrorFolder(new ErrorEntry(dropboxFolder.Error, dropboxFolder.ErrorId));
+
+        folder.Title = MakeFolderTitle(dropboxFolder);
+
+        return folder;
+    }
+
+    public File<string> ToFile(FileMetadata dropboxFile)
+    {
+        switch (dropboxFile)
+        {
+            case null:
+                return null;
+            case ErrorFile errorFile:
+                return ToErrorFile(errorFile);
+        }
+
+        var file = GetFile();
+
+        file.Id = MakeId(dropboxFile);
+        file.ContentLength = (long)dropboxFile.Size;
+        file.CreateOn = _tenantUtil.DateTimeFromUtc(dropboxFile.ServerModified);
+        file.ParentId = MakeId(GetParentFolderId(dropboxFile));
+        file.ModifiedOn = _tenantUtil.DateTimeFromUtc(dropboxFile.ServerModified);
+        file.Title = MakeFileTitle(dropboxFile);
+        file.ThumbnailStatus = Thumbnail.Created;
+        file.Encrypted = ProviderInfo.Private;
+
+        return file;
+    }
+
+    public async Task<Folder<string>> GetRootFolderAsync()
+    {
+        return ToFolder(await GetFolderAsync(string.Empty));
+    }
+
+    public async Task<FolderMetadata> CreateFolderAsync(string title, string folderId)
+    {
+        return await _providerInfo.CreateFolderAsync(title, MakeThirdId(folderId), GetId);
+    }
+
+    public async Task<FolderMetadata> GetFolderAsync(string folderId)
+    {
+        var dropboxFolderId = MakeThirdId(folderId);
+        try
+        {
+            var folder = await _providerInfo.GetFolderAsync(dropboxFolderId);
+            return folder;
+        }
+        catch (Exception ex)
+        {
+            return new ErrorFolder(ex, dropboxFolderId);
+        }
+    }
+
+    public Task<FileMetadata> GetFileAsync(string fileId)
+    {
+        var dropboxFileId = MakeThirdId(fileId);
+        try
+        {
+            return _providerInfo.GetFileAsync(dropboxFileId);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult<FileMetadata>(new ErrorFile(ex, dropboxFileId));
+        }
+    }
+
+    public override async Task<IEnumerable<string>> GetChildrenAsync(string folderId)
+    {
+        var items = await GetItemsAsync(folderId);
+
+        return items.Select(MakeId);
+    }
+
+    public async Task<List<Metadata>> GetItemsAsync(string parentId, bool? folder = null)
+    {
+        var dropboxFolderId = MakeThirdId(parentId);
+        var items = await _providerInfo.GetItemsAsync(dropboxFolderId, GetId, IsFile);
+
+        if (!folder.HasValue)
+        {
+            return items;
+        }
+
+        return folder.Value ? items.Where(i => i.AsFolder != null).ToList() : items.Where(i => i.AsFile != null).ToList();
+    }
+
+    private sealed class ErrorFolder : FolderMetadata, IErrorItem
+    {
+        public string Error { get; }
+        public string ErrorId { get; }
+
+        public ErrorFolder(Exception e, object id)
+        {
+            ErrorId = id.ToString();
+            if (e != null)
+            {
+                Error = e.Message;
+            }
+        }
+    }
+
+    private sealed class ErrorFile : FileMetadata, IErrorItem
+    {
+        public string Error { get; }
+        public string ErrorId { get; }
+
+        public ErrorFile(Exception e, object id)
+        {
+            ErrorId = id.ToString();
+            if (e != null)
+            {
+                Error = e.Message;
+            }
+        }
+    }
+}

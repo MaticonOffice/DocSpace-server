@@ -1,0 +1,440 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Files.Configuration;
+
+[Scope]
+public class ProductEntryPoint : Product
+{
+    private const string ProductPath = "/";
+
+    private readonly FilesSpaceUsageStatManager _filesSpaceUsageStatManager;
+    private readonly CoreBaseSettings _coreBaseSettings;
+    private readonly UserManager _userManager;
+    private readonly NotifyConfiguration _notifyConfiguration;
+    private readonly AuditEventsRepository _auditEventsRepository;
+    private readonly IDaoFactory _daoFactory;
+    private readonly TenantManager _tenantManager;
+    private readonly RoomsNotificationSettingsHelper _roomsNotificationSettingsHelper;
+    private readonly PathProvider _pathProvider;
+    private readonly FileUtility _fileUtility;
+    private readonly FilesLinkUtility _filesLinkUtility;
+    private readonly CommonLinkUtility _commonLinkUtility;
+    private readonly FileSecurity _fileSecurity;
+    private readonly GlobalFolder _globalFolder;
+    private readonly ILogger<ProductEntryPoint> _logger;
+
+    //public SubscriptionManager SubscriptionManager { get; }
+
+    public ProductEntryPoint() { }
+
+    public ProductEntryPoint(
+        FilesSpaceUsageStatManager filesSpaceUsageStatManager,
+        CoreBaseSettings coreBaseSettings,
+        UserManager userManager,
+        NotifyConfiguration notifyConfiguration,
+        AuditEventsRepository auditEventsRepository,
+        IDaoFactory daoFactory,
+        TenantManager tenantManager,
+        RoomsNotificationSettingsHelper roomsNotificationSettingsHelper,
+        PathProvider pathProvider,
+        FileUtility fileUtility,
+        FilesLinkUtility filesLinkUtility,
+        FileSecurity fileSecurity,
+        GlobalFolder globalFolder,
+        CommonLinkUtility commonLinkUtility,
+        ILogger<ProductEntryPoint> logger
+        //            SubscriptionManager subscriptionManager
+        )
+    {
+        _filesSpaceUsageStatManager = filesSpaceUsageStatManager;
+        _coreBaseSettings = coreBaseSettings;
+        _userManager = userManager;
+        _notifyConfiguration = notifyConfiguration;
+        _auditEventsRepository = auditEventsRepository;
+        _daoFactory = daoFactory;
+        _tenantManager = tenantManager;
+        _roomsNotificationSettingsHelper = roomsNotificationSettingsHelper;
+        _pathProvider = pathProvider;
+        _fileUtility = fileUtility;
+        _filesLinkUtility = filesLinkUtility;
+        _fileSecurity = fileSecurity;
+        _globalFolder = globalFolder;
+        _commonLinkUtility = commonLinkUtility;
+        _logger = logger;
+        //SubscriptionManager = subscriptionManager;
+    }
+
+    public static readonly Guid ID = WebItemManager.DocumentsProductID;
+
+    private ProductContext _productContext;
+
+    public override bool Visible => true;
+    public override bool IsPrimary => true;
+
+    public override void Init()
+    {
+        _productContext =
+            new ProductContext
+            {
+                DisabledIconFileName = "product_disabled_logo.png",
+                IconFileName = "images/files.menu.svg",
+                LargeIconFileName = "images/files.svg",
+                DefaultSortOrder = 10,
+                //SubscriptionManager = SubscriptionManager,
+                SpaceUsageStatManager = _filesSpaceUsageStatManager,
+                AdminOpportunities = AdminOpportunities,
+                UserOpportunities = UserOpportunities,
+                CanNotBeDisabled = true
+            };
+
+        _notifyConfiguration?.Configure();
+        return;
+
+        List<string> UserOpportunities() => (_coreBaseSettings.CustomMode
+            ? CustomModeResource.ProductUserOpportunitiesCustomMode
+            : FilesCommonResource.ProductUserOpportunities).Split('|').ToList();
+
+        //SearchHandlerManager.Registry(new SearchHandler());
+        List<string> AdminOpportunities() => (_coreBaseSettings.CustomMode
+            ? CustomModeResource.ProductAdminOpportunitiesCustomMode
+            : FilesCommonResource.ProductAdminOpportunities).Split('|').ToList();
+    }
+
+    public override async Task<IEnumerable<ActivityInfo>> GetAuditEventsAsync(DateTime scheduleDate, Guid userId, Tenant tenant, WhatsNewType whatsNewType, CultureInfo cultureInfo)
+    {
+        IEnumerable<AuditEvent> events;
+        _tenantManager.SetCurrentTenant(tenant);
+
+        CultureInfo.CurrentCulture = cultureInfo;
+        CultureInfo.CurrentUICulture = cultureInfo;
+
+        if (whatsNewType == WhatsNewType.RoomsActivity)
+        {
+            events = await _auditEventsRepository.GetByFilterWithActionsAsync(
+                withoutUserId: userId,
+                actions: StudioWhatsNewNotify.RoomsActivityActions,
+                from: scheduleDate.AddHours(-1),
+                to: scheduleDate.AddSeconds(-1),
+                limit: 100);
+        }
+        else
+        {
+            events = await _auditEventsRepository.GetByFilterWithActionsAsync(
+                withoutUserId: userId,
+                actions: StudioWhatsNewNotify.DailyActions,
+                from: scheduleDate.Date.AddDays(-1),
+                to: scheduleDate.Date.AddSeconds(-1),
+                limit: 100);
+        }
+
+        var docSpaceAdmin = await _userManager.IsDocSpaceAdminAsync(userId);
+
+        var disabledRooms = (await _roomsNotificationSettingsHelper.GetDisabledRoomsForCurrentUserAsync())
+            .Select(id=> $"folder_{id}");
+
+        var userSecurityWithRoleForSend = (await GetUserSecurityWithRoleAsync(userId, docSpaceAdmin))
+            .Where(r => !disabledRooms.Contains(r.Key))
+            .ToDictionary();
+
+        var result = new List<ActivityInfo>();
+
+        var filesOutsideRooms = new List<KeyValuePair<int, ActivityInfo>>();
+
+        foreach (var e in events)
+        {
+            var activityInfo = new ActivityInfo
+            {
+                UserId = e.UserId,
+                Action = (MessageAction)e.Action,
+                Date = e.Date,
+                FileTitle = e.Action != (int)MessageAction.UserFileUpdated ? e.Description[0] : e.Description[1]
+            };
+
+            string fileId = null;
+
+            switch (e.Action)
+            {
+                case (int)MessageAction.RoomCreated or (int)MessageAction.AgentCreated when !docSpaceAdmin:
+                    continue;
+                case (int)MessageAction.FileCreated or (int)MessageAction.FileUpdatedRevisionComment or (int)MessageAction.FileUploaded or (int)MessageAction.UserFileUpdated:
+                    fileId = e.Target.GetItems().FirstOrDefault();
+                    activityInfo.FileUrl = _commonLinkUtility.GetFullAbsolutePath(_filesLinkUtility.GetFileWebPreviewUrl(_fileUtility, activityInfo.FileTitle, fileId));
+                    break;
+            }
+
+            EventDescription<JsonElement> additionalInfo;
+
+            try
+            {
+                additionalInfo = JsonSerializer.Deserialize<EventDescription<JsonElement>>(e.Description.LastOrDefault()!);
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorDeserializingAuditEvent(e.Id, ex);
+                continue;
+            }
+
+            activityInfo.TargetUsers = additionalInfo.UserIds;
+            activityInfo.IsAgent = additionalInfo.IsAgent.HasValue && additionalInfo.IsAgent.Value;
+            activityInfo.IsKnowledge = additionalInfo.ParentType is (int)FolderType.Knowledge;
+
+            switch (e.Action)
+            {
+                case (int)MessageAction.UserCreated or (int)MessageAction.UserUpdated:
+                    {
+                        if (docSpaceAdmin)
+                        {
+                            result.Add(activityInfo);
+                        }
+
+                        continue;
+                    }
+                case (int)MessageAction.UsersUpdatedType:
+                    {
+                        if (docSpaceAdmin)
+                        {
+                            activityInfo.UserRole = GetDocSpaceRoleString((EmployeeType)additionalInfo.UserRole);
+                            result.Add(activityInfo);
+                        }
+                        continue;
+                    }
+            }
+
+            var roomId = additionalInfo.RoomId.ValueKind switch
+            {
+                JsonValueKind.String when int.TryParse(additionalInfo.RoomId.GetString(), out var id) => id,
+                JsonValueKind.Number => additionalInfo.RoomId.GetInt32(),
+                _ => 0
+            };
+
+            if (roomId <= 0 && additionalInfo.ParentType == (int)FolderType.USER && int.TryParse(fileId, out var fileIdInt))
+            {
+                filesOutsideRooms.Add(new KeyValuePair<int, ActivityInfo>(fileIdInt, activityInfo));
+                continue;
+            }
+
+            if (e.Action != (int)MessageAction.RoomCreated && e.Action != (int)MessageAction.AgentCreated)
+            {
+                var uniqRoomId = $"folder_{roomId}";
+                if (roomId <= 0 || !userSecurityWithRoleForSend.TryGetValue(uniqRoomId, out var isRoomAdmin))
+                {
+                    continue;
+                }
+
+                if (!CheckRightsToReceive(userId, (MessageAction)e.Action, isRoomAdmin, activityInfo.TargetUsers))
+                {
+                    continue;
+                }
+            }
+
+            activityInfo.RoomUri = activityInfo.IsAgent
+                ? _pathProvider.GetAgentUrl(roomId.ToString())
+                : _pathProvider.GetRoomsUrl(roomId.ToString(), false);
+
+            activityInfo.RoomTitle = additionalInfo.RoomTitle;
+            activityInfo.RoomOldTitle = additionalInfo.RoomOldTitle;
+
+            if (e.Action == (int)MessageAction.RoomUpdateAccessForUser)
+            {
+                activityInfo.UserRole = GetRoomRoleString((FileShare)additionalInfo.UserRole, activityInfo.IsAgent);
+            }
+
+            result.Add(activityInfo);
+        }
+
+        if (filesOutsideRooms.Count > 0)
+        {
+            var folderDao = _daoFactory.GetFolderDao<int>();
+            var fileDao = _daoFactory.GetFileDao<int>();
+
+            var sharedFolderId = await _globalFolder.GetFolderShareAsync(_daoFactory);
+            var sharedFolder = await folderDao.GetFolderAsync(sharedFolderId);
+            var sharedFolderUrl = _pathProvider.GetFolderUrl(sharedFolder);
+
+            var fileIds = filesOutsideRooms.Select(kv => kv.Key).Distinct();
+            var filteredFileIds = await _fileSecurity.FilterReadAsync(fileDao.GetFilesAsync(fileIds)).Select(f => f.Id).ToListAsync();
+
+            foreach (var file in filesOutsideRooms)
+            {
+                if (!filteredFileIds.Contains(file.Key))
+                {
+                    continue;
+                }
+
+                file.Value.RoomUri = sharedFolderUrl;
+                file.Value.RoomTitle = FilesUCResource.SharedForMe;
+                file.Value.IsSharedForMe = true;
+                result.Add(file.Value);
+            }
+        }
+
+        return result;
+    }
+
+    public override Guid ProductID => ID;
+    public override string Name => FilesCommonResource.ProductName;
+
+    public override string Description => "";
+    public override string StartURL => ProductPath;
+    public override string HelpURL => PathProvider.StartURL;
+    public override string ProductClassName => "files";
+    public override ProductContext Context => _productContext;
+    public override string ApiURL => string.Empty;
+
+    private async Task<Dictionary<string, bool>> GetUserSecurityWithRoleAsync(Guid userId, bool isDocSpaceAdmin)
+    {
+        var result = new Dictionary<string, bool>();
+
+        var folderDao = _daoFactory.GetFolderDao<int>();
+        var securityDao = _daoFactory.GetSecurityDao<string>();
+
+        var currentUserSubjects = await _fileSecurity.GetUserSubjectsAsync(userId);
+        var currentUsersRecords = await securityDao.GetSharesAsync(currentUserSubjects).ToListAsync();
+
+        foreach (var record in currentUsersRecords)
+        {
+            var uniqId = $"{record.EntryType.ToStringLowerFast()}_{record.EntryId}";
+            if (record.Owner == userId || record.Share == FileShare.RoomManager)
+            {
+                result.TryAdd(uniqId, true);
+            }
+            else if (record.Share != FileShare.Restrict)
+            {
+                result.TryAdd(uniqId, false);
+            }
+        }
+        var virtualRoomsFolderId = await _globalFolder.GetFolderVirtualRoomsAsync(_daoFactory);
+        var aiAgentsFolderId = await _globalFolder.GetFolderAiAgentsAsync(_daoFactory);
+
+        var myRooms = await folderDao.GetRoomsAsync(null, null, null, userId, null, false, false, false, ProviderFilter.None, SubjectFilter.Owner, Guid.Empty, null, new List<int> { virtualRoomsFolderId, aiAgentsFolderId }).ToListAsync();
+
+        foreach (var room in myRooms)
+        {
+            result.TryAdd(room.UniqID, true);
+        }
+
+        if (isDocSpaceAdmin)
+        {
+            var archiveFolderId = await _globalFolder.GetFolderArchiveAsync(_daoFactory);
+
+            var rooms = await folderDao.GetRoomsAsync([archiveFolderId], null, null, Guid.Empty, null, false, false, false, ProviderFilter.None, null, Guid.Empty, null).ToListAsync();
+
+            foreach (var room in rooms)
+            {
+                result.TryAdd(room.UniqID, true);
+            }
+        }
+
+        return result;
+    }
+
+    private bool CheckRightsToReceive(Guid userId, MessageAction action, bool isRoomAdmin, List<Guid> targetUsers)
+    {
+        if (isRoomAdmin)
+        {
+            return true;
+        }
+
+        if (IsRoomAdminAction())
+        {
+            return false;
+        }
+
+        if (targetUsers != null
+            && !targetUsers.Contains(userId)
+            && IsRoomAdminOrTargetUserAction())
+        {
+            return false;
+        }
+
+        return true;
+
+        bool IsRoomAdminAction()
+        {
+            if (action is MessageAction.RoomRenamed or
+                MessageAction.RoomArchived or
+                MessageAction.RoomCreateUser or
+                MessageAction.RoomChangeOwner or
+                MessageAction.RoomRemoveUser or
+                MessageAction.AgentRenamed)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        bool IsRoomAdminOrTargetUserAction()
+        {
+            if (action is MessageAction.RoomUpdateAccessForUser or MessageAction.RoomDeleted or MessageAction.UsersUpdatedType)
+            {
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    private static string GetDocSpaceRoleString(EmployeeType employeeType)
+    {
+        return employeeType switch
+        {
+            EmployeeType.Guest or
+            EmployeeType.RoomAdmin or
+            EmployeeType.DocSpaceAdmin or
+            EmployeeType.User => FilesCommonResource.ResourceManager.GetString("RoleEnum_" + employeeType.ToStringFast()),
+            _ => string.Empty
+        };
+    }
+
+    private static string GetRoomRoleString(FileShare userRoomRole, bool isAgent)
+    {
+        if (isAgent && userRoomRole == FileShare.RoomManager)
+        {
+            return FilesCommonResource.AgentManager;
+        }
+
+        return userRoomRole switch
+        {
+            FileShare.Read or
+            FileShare.Review or
+            FileShare.Comment or
+            FileShare.FillForms or
+            FileShare.RoomManager or
+            FileShare.Editing or
+            FileShare.ContentCreator => FilesCommonResource.ResourceManager.GetString("RoleEnum_" + userRoomRole.ToStringFast()),
+            _ => string.Empty
+        };
+    }
+}

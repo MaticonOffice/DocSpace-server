@@ -1,0 +1,433 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Common.Log;
+using ASC.Web.Studio.UserControls.Management;
+
+using Constants = ASC.Core.Configuration.Constants;
+
+namespace ASC.People.Api;
+
+///<remarks>
+/// Third-party API.
+///</remarks>
+[DefaultRoute("thirdparty")]
+public class ThirdpartyController(
+    ILogger<ThirdpartyController> logger,
+    AccountLinker accountLinker,
+    CoreBaseSettings coreBaseSettings,
+    CustomNamingPeople customNamingPeople,
+    DisplayUserSettingsHelper displayUserSettingsHelper,
+    IHttpClientFactory httpClientFactory,
+    MobileDetector mobileDetector,
+    ProviderManager providerManager,
+    UserHelpTourHelper userHelpTourHelper,
+    EmployeeDtoHelper employeeDtoHelper,
+    UserManagerWrapper userManagerWrapper,
+    UserPhotoManager userPhotoManager,
+    AuthContext authContext,
+    SecurityContext securityContext,
+    MessageService messageService,
+    UserManager userManager,
+    StudioNotifyService studioNotifyService,
+    TenantManager tenantManager,
+    InvitationService invitationService,
+    LoginProfileTransport loginProfileTransport,
+    EmailValidationKeyModelHelper emailValidationKeyModelHelper,
+    UserSocketManager socketManager,
+    UserWebhookManager webhookManager,
+    GeolocationHelper geolocationHelper)
+    : ApiControllerBase
+{
+
+
+    /// <remarks>
+    /// Returns a list of the available third-party accounts.
+    /// </remarks>
+    /// <summary>Get third-party accounts</summary>
+    /// <path>api/2.0/people/thirdparty/providers</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    /// <collection>list</collection>
+    [Tags("People / Third-party accounts")]
+    [SwaggerResponse(200, "List of third-party accounts", typeof(ICollection<AccountInfoDto>))]
+    [AllowAnonymous, AllowNotPayment]
+    [HttpGet("providers")]
+    public async Task<ICollection<AccountInfoDto>> GetThirdPartyAuthProviders(AuthProvidersRequestDto inDto)
+    {
+        var infos = new List<AccountInfoDto>();
+        var linkedAccounts = new List<LoginProfile>();
+
+        if (authContext.IsAuthenticated)
+        {
+            linkedAccounts = await accountLinker.GetLinkedProfilesAsync(authContext.CurrentAccount.ID.ToString());
+        }
+
+        inDto.FromOnly = string.IsNullOrWhiteSpace(inDto.FromOnly) ? string.Empty : inDto.FromOnly.ToLower();
+
+        var geoInfoKey = (await geolocationHelper.GetIPGeolocationFromHttpContextAsync()).Key;
+
+        foreach (var provider in ProviderManager.GetSortedAuthProviders(geoInfoKey).Where(provider => string.IsNullOrEmpty(inDto.FromOnly) || inDto.FromOnly == provider || (provider == "google" && inDto.FromOnly == "openid")))
+        {
+            if (inDto.InviteView && ProviderManager.InviteExceptProviders.Contains(provider))
+            {
+                continue;
+            }
+            var loginProvider = providerManager.GetLoginProvider(provider);
+            if (loginProvider is { IsEnabled: true })
+            {
+
+                var url = VirtualPathUtility.ToAbsolute("~/login.ashx") + $"?auth={provider}";
+                var mode = inDto.SettingsView || inDto.InviteView || (!mobileDetector.IsMobile() && !Request.DesktopApp())
+                        ? $"&mode=popup&callback={inDto.ClientCallback}"
+                        : "&mode=Redirect&desktop=true";
+
+                infos.Add(new AccountInfoDto
+                {
+                    Linked = linkedAccounts.Any(x => x.Provider == provider),
+                    Provider = provider,
+                    Url = url + mode
+                });
+            }
+        }
+
+        return infos;
+    }
+
+    /// <remarks>
+    /// Links a third-party account specified in the request to the user profile.
+    /// </remarks>
+    /// <summary>
+    /// Link a third-pary account
+    /// </summary>
+    /// <path>api/2.0/people/thirdparty/linkaccount</path>
+    [Tags("People / Third-party accounts")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(405, "Error not allowed option")]
+    [HttpPut("linkaccount")]
+    public async Task LinkThirdPartyAccount(LinkAccountRequestDto inDto)
+    {
+        var profile = await loginProfileTransport.FromTransport(inDto.SerializedProfile);
+
+        if (!(coreBaseSettings.Standalone || (await tenantManager.GetCurrentTenantQuotaAsync()).Oauth))
+        {
+            throw new SecurityException(Resource.ErrorNotAllowedOption);
+        }
+
+        if (string.IsNullOrEmpty(profile.AuthorizationError))
+        {
+            await accountLinker.AddLinkAsync(securityContext.CurrentAccount.ID, profile);
+            messageService.Send(MessageAction.UserLinkedSocialAccount, GetMeaningfulProviderName(profile.Provider));
+        }
+        else
+        {
+            // ignore cancellation
+            if (profile.AuthorizationError != "Canceled at provider")
+            {
+                throw new Exception(profile.AuthorizationError);
+            }
+        }
+    }
+
+    /// <remarks>
+    /// Creates a third-party account with the parameters specified in the request.
+    /// </remarks>
+    /// <summary>
+    /// Create a third-pary account
+    /// </summary>
+    /// <path>api/2.0/people/thirdparty/signup</path>
+    /// <requiresAuthorization>false</requiresAuthorization>
+    [Tags("People / Third-party accounts")]
+    [SwaggerResponse(200, "Ok")]
+    [SwaggerResponse(400, "Incorrect email")]
+    [SwaggerResponse(403, "The invitation link is invalid or its validity has expired")]
+    [AllowAnonymous]
+    [HttpPost("signup")]
+    public async Task<EmployeeDto> SignupThirdPartyAccount(SignupAccountRequestDto inDto)
+    {
+        var thirdPartyProfile = await loginProfileTransport.FromTransport(inDto.SerializedProfile);
+        if (!string.IsNullOrEmpty(thirdPartyProfile.AuthorizationError))
+        {
+            // ignore cancellation
+            if (thirdPartyProfile.AuthorizationError != "Canceled at provider")
+            {
+                throw new Exception(thirdPartyProfile.AuthorizationError);
+            }
+
+            return null;
+        }
+
+        var email = thirdPartyProfile.EMail;
+        var autoGeneratedEmail = false;
+
+        if (string.IsNullOrWhiteSpace(email) &&
+            ProviderManager.DummyEmailProviders.Contains(thirdPartyProfile.Provider)&&
+            providerManager.GetLoginProvider(thirdPartyProfile.Provider) is IDummyEmailProvider provider)
+        {
+            email = provider.GenerateEmail(thirdPartyProfile);
+            autoGeneratedEmail = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            throw new Exception(Resource.ErrorNotCorrectEmail);
+        }
+
+        var model = emailValidationKeyModelHelper.GetModel();
+        var linkData = await invitationService.GetLinkDataAsync(inDto.Key, null, null, inDto.EmployeeType ?? EmployeeType.RoomAdmin, model?.UiD);
+
+        if (!linkData.IsCorrect)
+        {
+            throw new SecurityException(FilesCommonResource.ErrorMessage_InvintationLink);
+        }
+
+        var passwordHash = UserManagerWrapper.GeneratePassword();
+        var employeeType = linkData.EmployeeType;
+        var quotaLimit = false;
+
+        var user = await GetUserByThirdPartyProfileAsync(thirdPartyProfile);
+        if (user.Id == ASC.Core.Users.Constants.LostUser.Id)
+        {
+            try
+            {
+                await securityContext.AuthenticateMeWithoutCookieAsync(Constants.CoreSystem);
+
+                var invitedByEmail = linkData.LinkType == InvitationLinkType.Individual;
+
+                (user, quotaLimit) = await CreateNewUser(
+                    thirdPartyProfile.FirstName,
+                    thirdPartyProfile.LastName,
+                    thirdPartyProfile.DisplayName,
+                    email,
+                    passwordHash,
+                    employeeType,
+                    false,
+                    invitedByEmail,
+                    inDto.Culture,
+                    model?.UiD,
+                    autoGeneratedEmail);
+
+                var messageAction = employeeType == EmployeeType.RoomAdmin ? MessageAction.UserCreatedViaInvite : MessageAction.GuestCreatedViaInvite;
+                messageService.Send(MessageInitiator.System, messageAction, MessageTarget.Create(user.Id), description: user.DisplayUserName(false, displayUserSettingsHelper));
+
+                if (!string.IsNullOrEmpty(thirdPartyProfile.Avatar))
+                {
+                    await SaveContactImage(user.Id, thirdPartyProfile.Avatar);
+                }
+
+                await accountLinker.AddLinkAsync(user.Id, thirdPartyProfile);
+
+                await webhookManager.PublishAsync(WebhookTrigger.UserCreated, user);
+
+                if (!autoGeneratedEmail)
+                {
+                    await studioNotifyService.UserPasswordChangeAsync(user, true);
+                }
+
+                await userHelpTourHelper.SetIsNewUser(true);
+
+                await securityContext.AuthenticateMeWithoutCookieAsync(user.Id);
+
+                await studioNotifyService.UserHasJoinAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.ErrorWithException(ex);
+            }
+            finally
+            {
+                securityContext.Logout();
+            }
+        }
+
+        if (user.Id == ASC.Core.Users.Constants.LostUser.Id)
+        {
+            return null;
+        }
+
+        if (linkData is { LinkType: InvitationLinkType.CommonToRoom })
+        {
+            await invitationService.AddUserToRoomByInviteAsync(linkData, user, quotaLimit);
+        }
+
+        return await employeeDtoHelper.GetAsync(user);
+    }
+
+    private async Task<UserInfo> GetUserByThirdPartyProfileAsync(LoginProfile profile)
+    {
+        if (!string.IsNullOrEmpty(profile.HashId))
+        {
+            var linkedProfiles = await accountLinker.GetLinkedObjectsByHashIdAsync(profile.HashId);
+            foreach (var profileId in linkedProfiles)
+            {
+                if (Guid.TryParse(profileId, out var userId))
+                {
+                    var user = await userManager.GetUsersAsync(userId);
+                    if (user.Id != Core.Users.Constants.LostUser.Id)
+                    {
+                        return user;
+                    }
+                }
+            }
+        }
+
+        if (!string.IsNullOrEmpty(profile.EMail))
+        {
+            var user = await userManager.GetUserByEmailAsync(profile.EMail);
+            if (user.Id != Core.Users.Constants.LostUser.Id && user.Status != EmployeeStatus.Terminated)
+            {
+                if (user.ActivationStatus != EmployeeActivationStatus.Activated)
+                {
+                    var msg = await customNamingPeople.Substitute<Resource>("ErrorEmailAlreadyExists");
+                    throw new InvalidOperationException(msg);
+                }
+
+                var linkedProfiles = await accountLinker.GetLinkedProfilesAsync(user.Id.ToString(), profile.Provider);
+                if (!linkedProfiles.Any())
+                {
+                    await accountLinker.AddLinkAsync(user.Id, profile);
+                }
+
+                return user;
+            }
+        }
+
+        return ASC.Core.Users.Constants.LostUser;
+    }
+
+    /// <remarks>
+    /// Unlinks a third-party account specified in the request from the user profile.
+    /// </remarks>
+    /// <summary>
+    /// Unlink a third-pary account
+    /// </summary>
+    /// <path>api/2.0/people/thirdparty/unlinkaccount</path>
+    [Tags("People / Third-party accounts")]
+    [HttpDelete("unlinkaccount")]
+    public async Task UnlinkThirdPartyAccount(UnlinkAccountRequestDto inDto)
+    {
+        await accountLinker.RemoveProviderAsync(securityContext.CurrentAccount.ID.ToString(), inDto.Provider);
+
+        messageService.Send(MessageAction.UserUnlinkedSocialAccount, GetMeaningfulProviderName(inDto.Provider));
+    }
+
+    private async Task<(UserInfo, bool)> CreateNewUser(string firstName, string lastName, string displayName, string email, string passwordHash, EmployeeType employeeType, bool fromInviteLink,
+        bool inviteByEmail, string cultureName, Guid? invitedBy, bool autoGeneratedEmail)
+    {
+        if (SetupInfo.IsSecretEmail(email))
+        {
+            fromInviteLink = false;
+        }
+
+        var user = new UserInfo();
+
+        if (inviteByEmail)
+        {
+            user = await userManager.GetUserByEmailAsync(email);
+
+            if (user.Equals(Core.Users.Constants.LostUser) || user.ActivationStatus != EmployeeActivationStatus.Pending)
+            {
+                throw new SecurityException(FilesCommonResource.ErrorMessage_InvintationLink);
+            }
+        }
+
+        if (!inviteByEmail)
+        {
+            user.CreatedBy = invitedBy;
+        }
+
+        if (string.IsNullOrWhiteSpace(firstName) && string.IsNullOrWhiteSpace(lastName) && !string.IsNullOrWhiteSpace(displayName))
+        {
+            firstName = displayName;
+        }
+
+        user.FirstName = string.IsNullOrWhiteSpace(firstName) ? UserControlsCommonResource.UnknownFirstName : firstName;
+        user.LastName = string.IsNullOrWhiteSpace(lastName) ? string.Empty : lastName;
+        user.Email = email;
+
+        if (autoGeneratedEmail)
+        {
+            user.ActivationStatus = EmployeeActivationStatus.AutoGenerated;
+        }
+
+        if (coreBaseSettings.EnabledCultures.Find(c => string.Equals(c.Name, cultureName, StringComparison.InvariantCultureIgnoreCase)) != null)
+        {
+            user.CultureName = cultureName;
+        }
+
+        var quotaLimit = false;
+        var notify = !autoGeneratedEmail;
+        try
+        {
+            user = await userManagerWrapper.AddUserAsync(user, passwordHash, true, notify, employeeType, fromInviteLink, updateExising: inviteByEmail);
+            if (employeeType is EmployeeType.Guest)
+            {
+                await socketManager.AddGuestAsync(user);
+            }
+            else
+            {
+                await socketManager.AddUserAsync(user);
+            }
+        }
+        catch (TenantQuotaException)
+        {
+            quotaLimit = true;
+            user = await userManagerWrapper.AddUserAsync(user, passwordHash, true, notify, EmployeeType.User, fromInviteLink, updateExising: inviteByEmail);
+            await socketManager.AddUserAsync(user);
+        }
+
+        return (user, quotaLimit);
+    }
+
+    private async Task SaveContactImage(Guid userID, string url)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+
+        #pragma warning disable CA2000
+        var httpClient = httpClientFactory.CreateClient();
+        #pragma warning restore CA2000
+
+        using var response = await httpClient.SendAsync(request);
+        var bytes = await response.Content.ReadAsByteArrayAsync();
+
+        await userPhotoManager.SaveOrUpdatePhoto(userID, bytes);
+    }
+
+    private static string GetMeaningfulProviderName(string providerName)
+    {
+        var result = string.IsNullOrEmpty(providerName)
+            ? null
+            : ConsumerExtension.GetResourceString(providerName == "openid" ? "Google" : providerName);
+
+        return result ?? "Unknown Provider";
+    }
+}

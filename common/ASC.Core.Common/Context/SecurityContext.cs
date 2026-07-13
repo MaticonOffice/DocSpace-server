@@ -1,0 +1,372 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Constants = ASC.Core.Configuration.Constants;
+
+namespace ASC.Core;
+
+[Scope]
+public class SecurityContext(
+    IHttpContextAccessor httpContextAccessor,
+    UserManager userManager,
+    AuthManager authentication,
+    AuthContext authContext,
+    TenantManager tenantManager,
+    UserFormatter userFormatter,
+    CookieStorage cookieStorage,
+    TenantCookieSettingsHelper tenantCookieSettingsHelper,
+    ILogger<SecurityContext> logger,
+    DbLoginEventsManager dbLoginEventsManager)
+{
+    public IAccount CurrentAccount => authContext.CurrentAccount;
+    public bool IsAuthenticated => authContext.IsAuthenticated;
+
+    public async Task<string> AuthenticateMeAsync(string login, string passwordHash, Func<Task<int>> funcLoginEvent = null, List<Claim> additionalClaims = null)
+    {
+        ArgumentNullException.ThrowIfNull(login);
+        ArgumentNullException.ThrowIfNull(passwordHash);
+
+        var tenantid = tenantManager.GetCurrentTenantId();
+        var u = await userManager.GetUsersByPasswordHashAsync(tenantid, login, passwordHash);
+
+        return await AuthenticateMeAsync(new UserAccount(u, tenantid, userFormatter), funcLoginEvent, additionalClaims);
+    }
+
+    public async Task<bool> AuthenticateMeAsync(string cookie)
+    {
+        if (string.IsNullOrEmpty(cookie))
+        {
+            return false;
+        }
+
+        if (!cookieStorage.DecryptCookie(cookie, out var tenant, out var userid, out var indexTenant, out var expire, out var indexUser, out var loginEventId))
+        {
+            if (cookie.Equals("Bearer", StringComparison.InvariantCulture))
+            {
+                var ipFrom = string.Empty;
+                var address = string.Empty;
+                if (httpContextAccessor?.HttpContext != null)
+                {
+                    var request = httpContextAccessor?.HttpContext.Request;
+
+                    ArgumentNullException.ThrowIfNull(request);
+
+                    ipFrom = "from " + httpContextAccessor?.HttpContext.Connection.RemoteIpAddress;
+                    address = "for " + request.Url();
+                }
+                logger.InformationEmptyBearer(ipFrom, address);
+            }
+            else
+            {
+                var ipFrom = string.Empty;
+                var address = string.Empty;
+                if (httpContextAccessor?.HttpContext != null)
+                {
+                    var request = httpContextAccessor?.HttpContext.Request;
+
+                    ArgumentNullException.ThrowIfNull(request);
+
+                    address = "for " + request.Url();
+                    ipFrom = "from " + httpContextAccessor?.HttpContext.Connection.RemoteIpAddress;
+                }
+
+                logger.WarningCanNotDecrypt(cookie, ipFrom, address);
+            }
+
+            return false;
+        }
+
+        if (tenant != tenantManager.GetCurrentTenantId())
+        {
+            return false;
+        }
+
+        var settingsTenant = await tenantCookieSettingsHelper.GetForTenantAsync(tenant);
+
+        if (indexTenant != settingsTenant.Index)
+        {
+            return false;
+        }
+
+        if (expire != DateTime.MaxValue && expire < DateTime.UtcNow)
+        {
+            return false;
+        }
+
+        try
+        {
+            var settingsUser = await tenantCookieSettingsHelper.GetForUserAsync(userid);
+            if (indexUser != settingsUser.Index)
+            {
+                return false;
+            }
+
+            if (loginEventId != 0)
+            {
+                var loginEventById = await dbLoginEventsManager.GetByIdAsync(tenant, loginEventId);
+                if (loginEventById is not { Active: true })
+                {
+                    return false;
+                }
+            }
+
+            var claims = new List<Claim>
+            {
+                AuthConstants.Claim_ScopeGlobalWrite
+            };
+
+            await AuthenticateMeWithoutCookieAsync(new UserAccount(new UserInfo { Id = userid }, tenant, userFormatter), claims);
+            return true;
+        }
+        catch (InvalidCredentialException ice)
+        {
+            logger.AuthenticateDebug(cookie, tenant, userid, ice);
+        }
+        catch (SecurityException se)
+        {
+            logger.AuthenticateDebug(cookie, tenant, userid, se);
+        }
+        catch (Exception err)
+        {
+            logger.AuthenticateError(cookie, tenant, userid, err);
+        }
+
+
+        return false;
+    }
+
+    public async Task<string> AuthenticateMeAsync(Guid userId, Func<Task<int>> funcLoginEvent = null, List<Claim> additionalClaims = null)
+    {
+        var account = await authentication.GetAccountByIDAsync(tenantManager.GetCurrentTenantId(), userId);
+        return await AuthenticateMeAsync(account, funcLoginEvent, additionalClaims);
+    }
+
+    public async Task<string> AuthenticateMeAsync(IAccount account, Func<Task<int>> funcLoginEvent = null, List<Claim> additionalClaims = null)
+    {
+        await AuthenticateMeWithoutCookieAsync(account, additionalClaims);
+
+        string cookie = null;
+
+        if (account is IUserAccount)
+        {
+            var loginEventId = 0;
+            if (funcLoginEvent != null)
+            {
+                loginEventId = await funcLoginEvent();
+            }
+
+            cookie = await cookieStorage.EncryptCookieAsync(tenantManager.GetCurrentTenantId(), account.ID, loginEventId);
+        }
+
+        return cookie;
+    }
+
+    public async Task AuthenticateMeWithoutCookieAsync(IAccount account, List<Claim> additionalClaims = null, Guid session = default)
+    {
+        if (account == null || account.Equals(Constants.Guest))
+        {
+            if (session == Guid.Empty || session == Constants.Guest.ID)
+            {
+                throw new InvalidCredentialException(nameof(account));
+            }
+
+            var anonymousSession = new AnonymousSession(Constants.Guest.ID, Constants.Guest.Name, session);
+            authContext.Principal = new CustomClaimsPrincipal(new ClaimsIdentity(anonymousSession, []), anonymousSession);
+
+            return;
+        }
+
+        var roles = new List<string> { Role.Authenticated };
+
+        if (account is ISystemAccount && account.ID == Constants.CoreSystem.ID)
+        {
+            roles.Add(Role.System);
+        }
+
+        if (account is IUserAccount)
+        {
+            var tenant = tenantManager.GetCurrentTenant();
+
+            var u = await userManager.GetUsersAsync(account.ID);
+
+            if (u.Id == Users.Constants.LostUser.Id)
+            {
+                throw new InvalidCredentialException("Invalid username or password.");
+            }
+            if (u.Status != EmployeeStatus.Active)
+            {
+                throw new SecurityException("Account disabled.");
+            }
+
+            // for LDAP users only
+            if (u.Sid != null)
+            {
+                if (!(await tenantManager.GetTenantQuotaAsync(tenant.Id)).Ldap)
+                {
+                    throw new BillingException("Your tariff plan does not support this option.");
+                }
+            }
+
+            if (await userManager.IsUserInGroupAsync(u.Id, Users.Constants.GroupAdmin.ID))
+            {
+                roles.Add(Role.DocSpaceAdministrators);
+            }
+
+            roles.Add(Role.RoomAdministrators);
+
+            account = new UserAccount(u, tenant.Id, userFormatter);
+        }
+
+        var claims = new List<Claim>
+            {
+                new(ClaimTypes.Sid, account.ID.ToString()),
+                new(ClaimTypes.Name, account.Name)
+            };
+        claims.AddRange(roles.Select(r => new Claim(ClaimTypes.Role, r)));
+
+        if (additionalClaims != null)
+        {
+            claims.AddRange(additionalClaims);
+        }
+
+        authContext.Principal = new CustomClaimsPrincipal(new ClaimsIdentity(account, claims), account);
+    }
+
+    public async Task AuthByClaimAsync()
+    {
+        var id = httpContextAccessor.HttpContext?.User.Claims.FirstOrDefault(r => r.Type == ClaimTypes.Sid);
+        if (Guid.TryParse(id?.Value, out var userId))
+        {
+            await AuthenticateMeWithoutCookieAsync(userId);
+        }
+    }
+
+    public async Task AuthenticateMeWithoutCookieAsync(Guid userId, List<Claim> additionalClaims = null)
+    {
+        await AuthenticateMeWithoutCookieAsync(tenantManager.GetCurrentTenantId(), userId, additionalClaims);
+    }
+
+    public async Task AuthenticateMeWithoutCookieAsync(int tenantId, Guid userId, List<Claim> additionalClaims = null)
+    {
+        var account = await authentication.GetAccountByIDAsync(tenantId, userId);
+        await AuthenticateMeWithoutCookieAsync(account, additionalClaims);
+    }
+
+    public void Logout()
+    {
+        authContext.Logout();
+    }
+
+    public async Task SetUserPasswordHashAsync(Guid userID, string passwordHash)
+    {
+        var tenantid = tenantManager.GetCurrentTenantId();
+        var u = await userManager.GetUsersByPasswordHashAsync(tenantid, userID.ToString(), passwordHash);
+        if (!Equals(u, Users.Constants.LostUser))
+        {
+            throw new PasswordException("A new password must be used");
+        }
+
+        await authentication.SetUserPasswordHashAsync(userID, passwordHash);
+    }
+
+    public class PasswordException(string message) : Exception(message);
+}
+
+[Scope]
+public class PermissionContext(IPermissionResolver permissionResolver, AuthContext authContext)
+{
+    public IPermissionResolver PermissionResolver { get; set; } = permissionResolver;
+    private AuthContext AuthContext { get; } = authContext;
+
+    public async Task<bool> CheckPermissionsAsync(IAction action)
+    {
+        return await PermissionResolver.CheckAsync(AuthContext.CurrentAccount, action);
+    }
+
+    public async Task<bool> CheckPermissionsAsync(ISecurityObject securityObject, IAction action)
+    {
+        return await PermissionResolver.CheckAsync(AuthContext.CurrentAccount, securityObject, null, action);
+    }
+
+    public async Task DemandPermissionsAsync(IAction action)
+    {
+        await PermissionResolver.DemandAsync(AuthContext.CurrentAccount, action);
+    }
+
+    public async Task DemandPermissionsAsync(IAction action1, IAction action2)
+    {
+        await PermissionResolver.DemandAsync(AuthContext.CurrentAccount, action1, action2);
+    }
+
+    public async Task DemandPermissionsAsync(ISecurityObject securityObject, IAction action)
+    {
+        await PermissionResolver.DemandAsync(AuthContext.CurrentAccount, securityObject, null, action);
+    }
+}
+
+[Scope]
+public class AuthContext(IHttpContextAccessor httpContextAccessor)
+{
+    private IHttpContextAccessor HttpContextAccessor { get; } = httpContextAccessor;
+    private static readonly List<string> _typesCheck = [ConfirmType.LinkInvite.ToStringFast(), ConfirmType.EmpInvite.ToStringFast()];
+
+    public IAccount CurrentAccount => Principal?.Identity as IAccount ?? Constants.Guest;
+
+    public bool IsAuthenticated => CurrentAccount.IsAuthenticated;
+
+    public void Logout()
+    {
+        Principal = null;
+    }
+
+    public bool IsFromInvite()
+    {
+        return Principal.Claims.Any(c => _typesCheck.Contains(c.Value));
+    }
+
+    internal ClaimsPrincipal Principal
+    {
+        get => field ?? CustomSynchronizationContext.CurrentContext?.CurrentPrincipal as ClaimsPrincipal ?? HttpContextAccessor?.HttpContext?.User;
+        set
+        {
+            field = value;
+
+            if (CustomSynchronizationContext.CurrentContext != null)
+            {
+                CustomSynchronizationContext.CurrentContext.CurrentPrincipal = value;
+            }
+
+            HttpContextAccessor?.HttpContext?.User = value;
+        }
+    }
+}

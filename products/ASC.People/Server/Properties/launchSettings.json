@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "applicationUrl": "http://localhost:5004",
+      "launchUrl": "http://localhost:5004",
+      "environmentVariables": {
+        "$STORAGE_ROOT": "../../../../Data",
+        "log__name": "people",
+        "log__dir": "../../../../Logs",
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

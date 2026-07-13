@@ -1,0 +1,149 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.ElasticSearch;
+
+[Singleton]
+public class Client(ILogger<Client> logger, Settings settings)
+{
+    private volatile OpenSearchClient _client;
+    private static readonly Lock _locker = new();
+
+    public OpenSearchClient Instance
+    {
+        get
+        {
+            if (_client != null)
+            {
+                return _client;
+            }
+
+            lock (_locker)
+            {
+                if (_client != null)
+                {
+                    return _client;
+                }
+
+                if (string.IsNullOrEmpty(settings.Scheme) || string.IsNullOrEmpty(settings.Host) || !settings.Port.HasValue)
+                {
+                    return null;
+                }
+
+                var uri = new Uri($"{settings.Scheme}://{settings.Host}:{settings.Port}");
+                // CA2000: SingleNodeConnectionPool and ConnectionSettings are owned by ElasticClient which will dispose them
+#pragma warning disable CA2000
+                var connectionSettings = new ConnectionSettings(new SingleNodeConnectionPool(uri))
+                    .TransferEncodingChunked()
+                    .RequestTimeout(TimeSpan.FromMinutes(5))
+                    .MaximumRetries(10)
+                    .ThrowExceptions();
+#pragma warning restore CA2000
+
+                if (settings.Authentication != null)
+                {
+                    connectionSettings.BasicAuthentication(settings.Authentication.Username, settings.Authentication.Password);
+                }
+
+                if (settings.ApiKey != null)
+                {
+                    connectionSettings.ApiKeyAuthentication(settings.ApiKey.Id, settings.ApiKey.Value);
+                }
+
+                if (logger.IsEnabled(LogLevel.Trace))
+                {
+                    connectionSettings.DisableDirectStreaming().PrettyJson().EnableDebugMode(r =>
+                    {
+                        logger.Debug(r.DebugInformation);
+
+                        if (r.RequestBodyInBytes != null)
+                        {
+                            logger.Debug($"Request: {Encoding.UTF8.GetString(r.RequestBodyInBytes)}");
+                        }
+
+                        if (r.HttpStatusCode is 403 or 500 && r.ResponseBodyInBytes != null)
+                        {
+                            logger.TraceResponse(Encoding.UTF8.GetString(r.ResponseBodyInBytes));
+                        }
+                    });
+                }
+
+                try
+                {
+                    var client = new OpenSearchClient(connectionSettings);
+                    if (Ping(client))
+                    {
+                        client.Ingest.PutPipeline("attachments", p =>
+                            p.Processors(pp =>
+                                pp.Attachment<Attachment>(a =>
+                                    a.Field("document.data")
+                                        .TargetField("document.attachment")
+                                        .IndexedCharacters(-1))
+                                    .Remove<Document>(x =>
+                                        x.Field("document.data"))));
+
+                        _client = client;
+                    }
+
+                    return client;
+
+                }
+                catch (Exception e)
+                {
+                    logger.ErrorClient(e);
+                }
+
+                return null;
+            }
+        }
+    }
+
+    public bool Ping()
+    {
+        return Ping(Instance);
+    }
+
+    private bool Ping(OpenSearchClient elasticClient)
+    {
+        if (elasticClient == null)
+        {
+            return false;
+        }
+
+        var result = elasticClient.Ping(new PingRequest());
+
+        logger.DebugPing(result.DebugInformation);
+
+        return result.IsValid;
+    }
+}

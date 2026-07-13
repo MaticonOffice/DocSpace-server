@@ -1,0 +1,296 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+global using System.Data.Common;
+global using System.Collections.Concurrent;
+global using System.Collections.Frozen;
+global using System.Collections.Immutable;
+global using System.ClientModel;
+global using System.ClientModel.Primitives;
+global using System.ComponentModel;
+global using System.ComponentModel.DataAnnotations;
+global using System.Diagnostics;
+global using System.Extensions;
+global using System.Globalization;
+global using System.Linq.Expressions;
+global using System.Net;
+global using System.Net.Http.Headers;
+global using System.Net.Mime;
+global using System.Net.Http.Json;
+global using System.Net.Sockets;
+global using System.Runtime.Serialization;
+global using System.Security;
+global using System.Security.Cryptography;
+global using System.Security.Principal;
+global using System.Text;
+global using System.Text.Encodings.Web;
+global using System.Text.Json;
+global using System.Text.Json.Serialization;
+global using System.Text.RegularExpressions;
+global using System.Text.Unicode;
+global using System.Web;
+global using System.Xml;
+
+global using ASC.Api.Core;
+global using ASC.Api.Core.Extensions;
+global using ASC.Api.Core.Model;
+global using ASC.Api.Core.Security;
+global using ASC.Api.Core.Socket;
+global using ASC.Api.Utils;
+global using ASC.AuditTrail;
+global using ASC.AuditTrail.Models;
+global using ASC.AuditTrail.Repositories;
+global using ASC.Common;
+global using ASC.Common.Caching;
+global using ASC.Common.Log;
+global using ASC.Common.protos;
+global using ASC.Common.Security.Authentication;
+global using ASC.Common.Security.Authorizing;
+global using ASC.Common.Threading;
+global using ASC.Common.Threading.DistributedLock.Abstractions;
+global using ASC.Common.Threading.HeartBeat.Abstractions;
+global using ASC.Common.Utils;
+global using ASC.Common.Web;
+global using ASC.Core;
+global using ASC.Core.Billing;
+global using ASC.Core.ChunkedUploader;
+global using ASC.Core.Common;
+global using ASC.Core.Common.AI;
+global using ASC.Core.Common.Configuration;
+global using ASC.Core.Common.EF.Model.Ai;
+global using ASC.Core.Common.Core;
+global using ASC.Core.Common.EF;
+global using ASC.Core.Common.EF.Context;
+global using ASC.Core.Common.EF.Model;
+global using ASC.Core.Common.Hosting;
+global using ASC.Core.Common.Messaging;
+global using ASC.Core.Common.Quota;
+global using ASC.Core.Common.Quota.Custom;
+global using ASC.Core.Common.Quota.Features;
+global using ASC.Core.Common.Security;
+global using ASC.Core.Common.Settings;
+global using ASC.Core.Common.Users;
+global using ASC.Core.Notify.Socket;
+global using ASC.Core.Tenants;
+global using ASC.Core.Users;
+global using ASC.Data.Storage;
+global using ASC.Data.Storage.ChunkedUploader;
+global using ASC.Data.Storage.DataOperators;
+global using ASC.Data.Storage.S3;
+global using ASC.ElasticSearch;
+global using ASC.ElasticSearch.Core;
+global using ASC.ElasticSearch.Service;
+global using ASC.ElasticSearch.VectorData;
+global using ASC.EventBus.Abstractions;
+global using ASC.EventBus.Events;
+global using ASC.FederatedLogin;
+global using ASC.FederatedLogin.Helpers;
+global using ASC.FederatedLogin.LoginProviders;
+global using ASC.FederatedLogin.DatabaseProviders;
+global using ASC.Files.Core;
+global using ASC.Files.Core.ApiModels;
+global using ASC.Files.Core.ApiModels.RequestDto;
+global using ASC.Files.Core.ApiModels.ResponseDto;
+global using ASC.Files.Core.Core;
+global using ASC.Files.Core.Core.AI;
+global using ASC.Files.Core.Core.Entries;
+global using ASC.Files.Core.Core.History;
+global using ASC.Files.Core.Core.History.Interpreters;
+global using ASC.Files.Core.Core.Thirdparty;
+global using ASC.Files.Core.Core.Thirdparty.ProviderDao;
+global using ASC.Files.Core.Core.Thirdparty.WebDav;
+global using ASC.Files.Core.Data;
+global using ASC.Files.Core.EF;
+global using ASC.Files.Core.Entries;
+global using ASC.Files.Core.Exceptions;
+global using ASC.Files.Core.ExternalDatabase;
+global using ASC.Files.Core.Helpers;
+global using ASC.Files.Core.IntegrationEvents.Events;
+global using ASC.Files.Core.Log;
+global using ASC.Files.Core.Resources;
+global using ASC.Files.Core.RoomTemplates.Events;
+global using ASC.Files.Core.RoomTemplates.Operations;
+global using ASC.Files.Core.Security;
+global using ASC.Files.Core.Services.ExternalDbSync;
+global using ASC.Files.Core.Services.NotifyService;
+global using ASC.Files.Core.Services.OFormService;
+global using ASC.Files.Core.Services.WCFService.Wrappers;
+global using ASC.Files.Core.Text;
+global using ASC.Files.Core.Thirdparty;
+global using ASC.Files.Core.Vectorization;
+global using ASC.Files.Core.Vectorization.Events;
+global using ASC.Files.Core.Vectorization.Embedding;
+global using ASC.Files.Core.Vectorization.Settings;
+global using ASC.Files.Core.VirtualRooms;
+global using ASC.Files.Core.Utils;
+global using ASC.Files.Thirdparty;
+global using ASC.Files.Thirdparty.Box;
+global using ASC.Files.Thirdparty.Dropbox;
+global using ASC.Files.Thirdparty.GoogleDrive;
+global using ASC.Files.Thirdparty.OneDrive;
+global using ASC.Files.Thirdparty.SharePoint;
+global using ASC.Files.ThumbnailBuilder;
+global using ASC.MessagingSystem;
+global using ASC.MessagingSystem.Core;
+global using ASC.MessagingSystem.EF.Model;
+global using ASC.Notify.Model;
+global using ASC.Notify.Patterns;
+global using ASC.Notify.Recipients;
+global using ASC.Security.Cryptography;
+global using ASC.Web.Api.Models;
+global using ASC.Web.Core;
+global using ASC.Web.Core.Files;
+global using ASC.Web.Core.Notify;
+global using ASC.Web.Core.PublicResources;
+global using ASC.Web.Core.Quota;
+global using ASC.Web.Core.Users;
+global using ASC.Web.Core.Utility;
+global using ASC.Web.Core.Utility.Settings;
+global using ASC.Web.Core.Utility.Skins;
+global using ASC.Web.Core.WhiteLabel;
+global using ASC.Web.Files;
+global using ASC.Web.Files.Api;
+global using ASC.Web.Files.Classes;
+global using ASC.Web.Files.Configuration;
+global using ASC.Web.Files.Core;
+global using ASC.Web.Files.Core.Compress;
+global using ASC.Web.Files.Core.Entries;
+global using ASC.Web.Files.Core.Search;
+global using ASC.Web.Files.Helpers;
+global using ASC.Web.Files.HttpHandlers;
+global using ASC.Web.Files.Services.DocumentService;
+global using ASC.Web.Files.Services.FFmpegService;
+global using ASC.Web.Files.Services.WCFService;
+global using ASC.Web.Files.Services.WCFService.FileOperations;
+global using ASC.Web.Files.ThirdPartyApp;
+global using ASC.Web.Files.Utils;
+global using ASC.Web.Studio.Core;
+global using ASC.Web.Studio.Core.Notify;
+global using ASC.Web.Studio.Utility;
+global using ASC.Webhooks.Core;
+
+global using Box.V2;
+global using Box.V2.Auth;
+global using Box.V2.Config;
+global using Box.V2.Models;
+
+global using DocuSign.eSign.Api;
+global using DocuSign.eSign.Client;
+global using DocuSign.eSign.Model;
+
+global using Dropbox.Api;
+global using Dropbox.Api.Files;
+
+global using Google;
+global using Google.Apis.Auth.OAuth2;
+global using Google.Apis.Auth.OAuth2.Flows;
+global using Google.Apis.Auth.OAuth2.Responses;
+global using Google.Apis.Drive.v3;
+global using Google.Apis.Services;
+
+global using ICSharpCode.SharpZipLib.GZip;
+global using ICSharpCode.SharpZipLib.Tar;
+global using ICSharpCode.SharpZipLib.Zip;
+
+global using Joonasw.AspNetCore.SecurityHeaders.Csp.Builder;
+
+global using JWT.Exceptions;
+
+global using Microsoft.AspNetCore.Builder;
+global using Microsoft.AspNetCore.Http;
+global using Microsoft.AspNetCore.Mvc;
+global using Microsoft.AspNetCore.Mvc.ModelBinding;
+global using Microsoft.AspNetCore.WebUtilities;
+global using Microsoft.EntityFrameworkCore;
+global using Microsoft.EntityFrameworkCore.Storage;
+global using Microsoft.Extensions.AI;
+global using Microsoft.Extensions.Caching.Memory;
+global using Microsoft.Extensions.Configuration;
+global using Microsoft.Extensions.DependencyInjection;
+global using Microsoft.Extensions.Logging;
+global using Microsoft.Extensions.Primitives;
+global using Microsoft.Graph;
+global using Microsoft.OneDrive.Sdk;
+global using Microsoft.SharePoint.Client;
+
+global using NetEscapades.EnumGenerators;
+
+global using Newtonsoft.Json.Linq;
+
+global using OpenSearch.Client;
+
+global using OpenAI;
+
+global using Polly;
+global using Polly.Contrib.WaitAndRetry;
+global using Polly.Registry;
+global using Polly.Retry;
+global using Polly.Timeout;
+
+global using ProtoBuf;
+
+global using Riok.Mapperly.Abstractions;
+
+global using WebDav;
+
+global using ZiggyCreatures.Caching.Fusion;
+
+global using static ASC.Files.Core.Data.AbstractDao;
+global using static ASC.Files.Core.Helpers.DocumentService;
+global using static ASC.Files.Core.Helpers.DocumentService.CommandResponse;
+global using static ASC.Web.Files.Services.DocumentService.DocumentServiceTracker;
+global using static ASC.Web.Files.Utils.FileTracker;
+
+global using CommandMethod = ASC.Files.Core.Helpers.DocumentService.CommandMethod;
+global using Constants = ASC.Core.Users.Constants;
+global using ContentType = System.Net.Mime.ContentType;
+global using EnumMemberAttribute = System.Runtime.Serialization.EnumMemberAttribute;
+global using FilesDbContext = ASC.Files.Core.EF.FilesDbContext;
+global using FileShare = ASC.Files.Core.Security.FileShare;
+global using FileType = ASC.Web.Core.Files.FileType;
+global using HttpException = ASC.Common.Web.HttpException;
+global using JsonConverterAttribute = System.Text.Json.Serialization.JsonConverterAttribute;
+global using JsonIgnoreAttribute = System.Text.Json.Serialization.JsonIgnoreAttribute;
+global using JsonSerializer = System.Text.Json.JsonSerializer;
+global using JsonTokenType = System.Text.Json.JsonTokenType;
+global using License = ASC.Core.Billing.License;
+global using Location = ASC.Files.Core.Core.Entries.Location;
+global using LogLevel = Microsoft.Extensions.Logging.LogLevel;
+global using SecurityContext = ASC.Core.SecurityContext;
+global using FormFillingReportTask = ASC.Files.Core.Services.DocumentBuilderService.FormFillingReportTask;
+global using SocketManager = ASC.Web.Files.Utils.SocketManager;
+global using SortOrder = ASC.Api.Core.Core.SortOrder;
+global using Tag = ASC.Files.Core.Tag;
+global using Thumbnail = ASC.Files.Core.Thumbnail;
+global using Token = ASC.Web.Files.ThirdPartyApp.Token;
+global using UserInfo = ASC.Core.Users.UserInfo;

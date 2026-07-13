@@ -1,0 +1,185 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.authorization.application.security.filter;
+
+import com.asc.authorization.application.configuration.properties.SecurityConfigurationProperties;
+import com.asc.authorization.application.exception.authentication.AuthenticationProcessingException;
+import com.asc.authorization.application.exception.client.RegisteredClientPermissionException;
+import com.asc.authorization.application.security.SecurityUtils;
+import com.asc.authorization.application.security.oauth.error.AuthenticationError;
+import com.asc.common.utilities.HttpUtils;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Optional;
+import java.util.regex.Pattern;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+/**
+ * Filter for handling authentication based on a signature and replacing anonymous authentication
+ * with actual authentication.
+ *
+ * <p>This filter intercepts requests to specific OAuth2 endpoints, validates the client ID and
+ * signature, and sets the authenticated user in the security context. Errors during processing
+ * result in redirections with appropriate error codes.
+ */
+@Slf4j
+@Component("authorizationBasicSignatureAuthenticationFilter")
+public class BasicSignatureAuthenticationFilter extends OncePerRequestFilter {
+  /** Pattern for matching the OAuth2 authorization endpoint. */
+  private static final Pattern AUTHORIZE_PATTERN = Pattern.compile("/oauth2/authorize");
+
+  /** Pattern for matching the OAuth2 login endpoint. */
+  private static final Pattern LOGIN_PATTERN = Pattern.compile("/oauth2/login");
+
+  private final HttpUtils httpUtils;
+  private final SecurityUtils securityUtils;
+  private final AuthenticationManager authenticationManager;
+  private final SecurityConfigurationProperties securityConfigProperties;
+
+  public BasicSignatureAuthenticationFilter(
+      HttpUtils httpUtils,
+      SecurityUtils securityUtils,
+      @Qualifier("authorizationSignatureAuthenticationManager")
+          AuthenticationManager authenticationManager,
+      SecurityConfigurationProperties securityConfigProperties) {
+    this.httpUtils = httpUtils;
+    this.securityUtils = securityUtils;
+    this.authenticationManager = authenticationManager;
+    this.securityConfigProperties = securityConfigProperties;
+  }
+
+  /**
+   * Filters incoming requests, replacing anonymous authentication with actual authentication.
+   *
+   * <p>This method validates the presence of a client ID and signature, performs authentication,
+   * and sets the security context for successfully authenticated requests. In case of errors, it
+   * redirects the user with an appropriate error message.
+   *
+   * @param request the {@link HttpServletRequest}.
+   * @param response the {@link HttpServletResponse}.
+   * @param chain the {@link FilterChain}.
+   * @throws ServletException if an error occurs during the filter process.
+   * @throws IOException if an I/O error occurs during the filter process.
+   */
+  protected void doFilterInternal(
+      HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+      throws ServletException, IOException {
+    var clientId = request.getParameter(securityConfigProperties.getClientIdParameter());
+
+    if (clientId == null || clientId.isBlank()) {
+      log.warn(
+          "Missing or empty '{}' in query string", securityConfigProperties.getClientIdParameter());
+      securityUtils.redirectWithError(
+          request, response, clientId, AuthenticationError.MISSING_CLIENT_ID_ERROR.getCode());
+      return;
+    }
+
+    var cookie =
+        new Cookie(
+            securityConfigProperties.getRedirectAuthorizationCookie(),
+            Base64.getUrlEncoder().encodeToString(httpUtils.getFullURL(request).getBytes()));
+    cookie.setPath("/");
+    cookie.setMaxAge(60 * 60 * 24 * 365 * 10);
+    response.addCookie(cookie);
+
+    var signature =
+        Arrays.stream(Optional.ofNullable(request.getCookies()).orElse(new Cookie[0]))
+            .filter(
+                c -> c.getName().equalsIgnoreCase(securityConfigProperties.getSignatureCookie()))
+            .findFirst()
+            .map(Cookie::getValue)
+            .orElseGet(() -> request.getHeader(securityConfigProperties.getSignatureCookie()));
+
+    if (signature == null || signature.isBlank()) {
+      log.warn(
+          "Missing signature in both cookie and {} header",
+          securityConfigProperties.getSignatureCookie());
+      securityUtils.redirectWithError(
+          request, response, clientId, AuthenticationError.MISSING_ASC_SIGNATURE.getCode());
+      return;
+    }
+
+    try {
+      var authenticationToken = new UsernamePasswordAuthenticationToken(clientId, signature);
+      var authentication = authenticationManager.authenticate(authenticationToken);
+      if (authentication.isAuthenticated()) {
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        securityUtils.setSecurityHeaders(response);
+      }
+
+      chain.doFilter(request, response);
+    } catch (RegisteredClientPermissionException pex) {
+      log.warn("Current client does not permit current operation", pex);
+      securityUtils.redirectWithError(
+          request,
+          response,
+          clientId,
+          AuthenticationError.CLIENT_PERMISSION_DENIED_ERROR.getCode());
+    } catch (AuthenticationProcessingException aex) {
+      log.warn("Could not process authentication", aex);
+      securityUtils.redirectWithError(request, response, clientId, aex.getError().getCode());
+    } catch (Exception e) {
+      log.warn("Something went wrong", e);
+      securityUtils.redirectWithError(
+          request, response, clientId, AuthenticationError.SOMETHING_WENT_WRONG_ERROR.getCode());
+    }
+  }
+
+  /**
+   * Determines whether the filter should not be applied to a given request.
+   *
+   * <p>This method excludes requests to non-relevant endpoints from being processed by this filter.
+   *
+   * @param request the {@link HttpServletRequest}.
+   * @return {@code true} if the filter should not be applied, {@code false} otherwise.
+   */
+  protected boolean shouldNotFilter(HttpServletRequest request) {
+    var path = request.getRequestURI();
+    return !(LOGIN_PATTERN.matcher(path).find() && HttpMethod.POST.matches(request.getMethod()))
+        && !(AUTHORIZE_PATTERN.matcher(path).find());
+  }
+}

@@ -1,0 +1,197 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using Constants = ASC.Core.Users.Constants;
+
+namespace ASC.Web.Studio.Core.Notify;
+
+[Scope]
+public class StudioNotifyHelper(
+    StudioNotifySource studioNotifySource,
+    UserManager userManager,
+    SettingsManager settingsManager,
+    CommonLinkUtility commonLinkUtility,
+    TenantManager tenantManager,
+    TenantExtra tenantExtra,
+    WebImageSupplier webImageSupplier,
+    IConfiguration configuration,
+    ILogger<StudioNotifyHelper> logger)
+{
+    public string SiteLink => commonLinkUtility.GetSiteLink();
+
+    private ISubscriptionProvider SubscriptionProvider => field ??= NotifySource.GetSubscriptionProvider();
+
+    private IRecipientProvider RecipientsProvider => field ??= NotifySource.GetRecipientsProvider();
+
+    public readonly StudioNotifySource NotifySource = studioNotifySource;
+
+    public async Task<IEnumerable<UserInfo>> GetRecipientsAsync(bool toadmins, bool tousers, bool toguests)
+    {
+        if (toadmins)
+        {
+            if (tousers)
+            {
+                if (toguests)
+                {
+                    return await userManager.GetUsersAsync();
+                }
+
+                return await userManager.GetUsersAsync(EmployeeStatus.Default, EmployeeType.RoomAdmin);
+            }
+
+            if (toguests)
+            {
+                return (await userManager.GetUsersByGroupAsync(Constants.GroupAdmin.ID))
+                               .Concat(await userManager.GetUsersAsync(EmployeeStatus.Default, EmployeeType.Guest));
+            }
+
+            return await userManager.GetUsersByGroupAsync(Constants.GroupAdmin.ID);
+        }
+
+        if (tousers)
+        {
+            if (toguests)
+            {
+                return await (await userManager.GetUsersAsync()).ToAsyncEnumerable()
+                                  .Where(async (u, _) => !await userManager.IsUserInGroupAsync(u.Id, Constants.GroupAdmin.ID)).ToListAsync();
+            }
+
+            return await (await userManager.GetUsersAsync(EmployeeStatus.Default, EmployeeType.RoomAdmin)).ToAsyncEnumerable()
+                              .Where(async (u, _) => !await userManager.IsUserInGroupAsync(u.Id, Constants.GroupAdmin.ID)).ToListAsync();
+        }
+
+        if (toguests)
+        {
+            return await userManager.GetUsersAsync(EmployeeStatus.Default, EmployeeType.Guest);
+        }
+
+        return new List<UserInfo>();
+    }
+
+    public async Task<IRecipient> ToRecipientAsync(Guid userId)
+    {
+        return await RecipientsProvider.GetRecipientAsync(userId.ToString());
+    }
+
+    public async Task<IRecipient[]> RecipientFromEmailAsync(string email, bool checkActivation)
+    {
+        return await RecipientFromEmailAsync([email], checkActivation);
+    }
+
+    public async Task<IRecipient[]> RecipientFromEmailAsync(List<string> emails, bool checkActivation)
+    {
+        var res = new List<IRecipient>();
+
+        if (emails == null)
+        {
+            return res.ToArray();
+        }
+
+        res.AddRange(emails.
+                         Select(email => email.ToLower()).
+                         Select(e => new DirectRecipient(e, null, [e], checkActivation)));
+
+        int.TryParse(configuration["core:notify:countspam"], out var countMailsToNotActivated);
+        if (!checkActivation
+            && countMailsToNotActivated > 0
+            && tenantExtra.Saas)
+        {
+            var tenant = tenantManager.GetCurrentTenant();
+            var tariff = await tenantManager.GetTenantQuotaAsync(tenant.Id);
+            if (tariff.Free || tariff.Trial)
+            {
+                var spamEmailSettings = await settingsManager.LoadAsync<SpamEmailSettings>();
+                var sended = spamEmailSettings.MailsSended;
+
+                var mayTake = Math.Max(0, countMailsToNotActivated - sended);
+                var tryCount = res.Count;
+                if (mayTake < tryCount)
+                {
+                    res = res.Take(mayTake).ToList();
+
+                    logger.WarningFreeTenant(tenant.Id, tryCount, mayTake);
+                }
+                spamEmailSettings.MailsSended = sended + tryCount;
+                await settingsManager.SaveAsync(spamEmailSettings);
+            }
+        }
+
+        return res.ToArray();
+    }
+
+    public string GetNotificationImageUrl(string imageFileName)
+    {
+        var notificationImagePath = configuration["web:notification:image:path"];
+        if (string.IsNullOrEmpty(notificationImagePath))
+        {
+            return
+                commonLinkUtility.GetFullAbsolutePath(
+                    webImageSupplier.GetAbsoluteWebPath("notifications/" + imageFileName));
+        }
+
+        return notificationImagePath.TrimEnd('/') + "/" + imageFileName;
+    }
+
+
+    public async Task<bool> IsSubscribedToNotifyAsync(Guid userId, INotifyAction notifyAction)
+    {
+        return await IsSubscribedToNotifyAsync(await ToRecipientAsync(userId), notifyAction);
+    }
+
+    public async Task<bool> IsSubscribedToNotifyAsync(IRecipient recipient, INotifyAction notifyAction)
+    {
+        return recipient != null && await SubscriptionProvider.IsSubscribedAsync(logger, notifyAction, recipient, null);
+    }
+
+    public async Task SubscribeToNotifyAsync(Guid userId, INotifyAction notifyAction, bool subscribe)
+    {
+        await SubscribeToNotifyAsync(await ToRecipientAsync(userId), notifyAction, subscribe);
+    }
+
+    public async Task SubscribeToNotifyAsync(IRecipient recipient, INotifyAction notifyAction, bool subscribe)
+    {
+        if (recipient == null)
+        {
+            return;
+        }
+
+        if (subscribe)
+        {
+            await SubscriptionProvider.SubscribeAsync(notifyAction, null, recipient);
+        }
+        else
+        {
+            await SubscriptionProvider.UnSubscribeAsync(notifyAction, null, recipient);
+        }
+    }
+}

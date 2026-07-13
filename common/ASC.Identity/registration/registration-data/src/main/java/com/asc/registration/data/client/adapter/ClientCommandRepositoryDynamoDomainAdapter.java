@@ -1,0 +1,226 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.data.client.adapter;
+
+import com.asc.common.core.domain.event.DomainEventPublisher;
+import com.asc.common.core.domain.value.ClientId;
+import com.asc.common.core.domain.value.TenantId;
+import com.asc.common.core.domain.value.UserId;
+import com.asc.common.utilities.crypto.RandomStringGenerator;
+import com.asc.registration.core.domain.entity.Client;
+import com.asc.registration.core.domain.event.ClientEvent;
+import com.asc.registration.data.client.mapper.ClientDataAccessMapper;
+import com.asc.registration.data.client.repository.DynamoClientRepository;
+import com.asc.registration.service.ports.output.repository.ClientCommandRepository;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Adapter implementation of the {@link ClientCommandRepository} interface for DynamoDB. This class
+ * provides methods for managing client data in a DynamoDB repository, including saving, updating,
+ * regenerating secrets, changing visibility or activation, and deleting clients.
+ */
+@Slf4j
+@Repository
+@Profile(value = "saas")
+@RequiredArgsConstructor
+public class ClientCommandRepositoryDynamoDomainAdapter implements ClientCommandRepository {
+  private static final int CLIENT_SECRET_LENGTH = 36;
+  private static final String UTC = "UTC";
+
+  private final DynamoClientRepository dynamoClientRepository;
+  private final ClientDataAccessMapper clientDataAccessMapper;
+  private final DomainEventPublisher<ClientEvent> messagePublisher;
+
+  /**
+   * Saves a client to the DynamoDB repository and publishes the associated event.
+   *
+   * @param event the client event to be published
+   * @param client the client entity to be saved
+   * @return the saved client entity
+   */
+  @Transactional(readOnly = true)
+  public Client saveClient(ClientEvent event, Client client) {
+    log.debug("Persisting a new client");
+
+    dynamoClientRepository.save(clientDataAccessMapper.toDynamoEntity(client));
+    messagePublisher.publish(event);
+    return client;
+  }
+
+  /**
+   * Updates a client in the DynamoDB repository and publishes the associated event.
+   *
+   * @param event the client event to be published
+   * @param client the client entity to be updated
+   * @return the updated client entity
+   */
+  @Transactional(readOnly = true)
+  public Client updateClient(ClientEvent event, Client client) {
+    log.debug("Updating an existing client");
+
+    var result = dynamoClientRepository.update(clientDataAccessMapper.toDynamoEntity(client));
+    messagePublisher.publish(event);
+    return clientDataAccessMapper.toDomain(result);
+  }
+
+  /**
+   * Regenerates the client secret for a specific tenant and client in the DynamoDB repository and
+   * publishes the associated event.
+   *
+   * @param event the client event to be published
+   * @param tenantId the tenant ID
+   * @param clientId the client ID
+   * @return the newly generated client secret
+   */
+  @Transactional(readOnly = true)
+  public String regenerateClientSecretByTenantIdAndClientId(
+      ClientEvent event, TenantId tenantId, ClientId clientId) {
+    log.debug("Regenerating and persisting a new secret");
+
+    var secret = RandomStringGenerator.generate(CLIENT_SECRET_LENGTH);
+
+    log.debug("Newly generated secret: {}", secret);
+
+    dynamoClientRepository.updateClientSecret(
+        clientId.getValue().toString(),
+        tenantId.getValue(),
+        secret,
+        ZonedDateTime.now(ZoneId.of(UTC)));
+    messagePublisher.publish(event);
+    return secret;
+  }
+
+  /**
+   * Changes the visibility of a client for a specific tenant and client in the DynamoDB repository
+   * and publishes the associated event.
+   *
+   * @param event the client event to be published
+   * @param tenantId the tenant ID
+   * @param clientId the client ID
+   * @param visible the new visibility state
+   */
+  @Transactional(readOnly = true)
+  public void changeVisibilityByTenantIdAndClientId(
+      ClientEvent event, TenantId tenantId, ClientId clientId, boolean visible) {
+    log.debug("Persisting client visibility changes");
+
+    dynamoClientRepository.updateVisibility(
+        clientId.getValue().toString(),
+        tenantId.getValue(),
+        visible,
+        ZonedDateTime.now(ZoneId.of(UTC)));
+    messagePublisher.publish(event);
+  }
+
+  /**
+   * Changes the activation state of a client for a specific tenant and client in the DynamoDB
+   * repository and publishes the associated event.
+   *
+   * @param event the client event to be published
+   * @param tenantId the tenant ID
+   * @param clientId the client ID
+   * @param enabled the new activation state
+   */
+  @Transactional(readOnly = true)
+  public void changeActivationByTenantIdAndClientId(
+      ClientEvent event, TenantId tenantId, ClientId clientId, boolean enabled) {
+    log.debug("Persisting activation changes");
+
+    dynamoClientRepository.updateActivation(
+        clientId.getValue().toString(),
+        tenantId.getValue(),
+        enabled,
+        ZonedDateTime.now(ZoneId.of(UTC)));
+    messagePublisher.publish(event);
+  }
+
+  /**
+   * Deletes a client for a specific tenant and client in the DynamoDB repository, publishes the
+   * associated removal event, and returns the result.
+   *
+   * @param event the client event to be published
+   * @param tenantId the tenant ID
+   * @param clientId the client ID
+   * @return 1 if the client was successfully deleted, 0 otherwise
+   */
+  @Transactional(readOnly = true)
+  public int deleteByTenantIdAndClientId(ClientEvent event, TenantId tenantId, ClientId clientId) {
+    log.debug("Persisting invalidated marker");
+
+    messagePublisher.publish(event);
+    return dynamoClientRepository.deleteByIdAndTenantId(
+                clientId.getValue().toString(), tenantId.getValue())
+            != null
+        ? 1
+        : 0;
+  }
+
+  /**
+   * Deletes all clients for a specific tenant and user in the DynamoDB repository.
+   *
+   * @param tenantId the tenant ID
+   * @param userId the user ID of the client creator
+   * @return 1 indicating the deletion operation was executed
+   */
+  @Transactional(readOnly = true)
+  public int deleteAllByTenantIdAndCreatedBy(TenantId tenantId, UserId userId) {
+    log.debug(
+        "Deleting all clients for current user {} and tenant {}",
+        userId.getValue(),
+        tenantId.getValue());
+
+    dynamoClientRepository.deleteAllByTenantIdAndCreatedBy(tenantId.getValue(), userId.getValue());
+    return 1;
+  }
+
+  /**
+   * Deletes all clients for a specific tenant in the DynamoDB repository.
+   *
+   * @param tenantId the tenant ID
+   * @return 1 indicating the deletion operation was executed
+   */
+  @Transactional(readOnly = true)
+  public int deleteAllByTenantId(TenantId tenantId) {
+    log.debug("Deleting all clients for current tenant {}", tenantId.getValue());
+
+    dynamoClientRepository.deleteAllByTenantId(tenantId.getValue());
+    return 1;
+  }
+}

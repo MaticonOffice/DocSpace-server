@@ -1,0 +1,256 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Data.Storage.Configuration;
+
+[Singleton]
+public class BaseStorageSettingsListener(IServiceProvider serviceProvider, ICacheNotify<ConsumerCacheItem> cacheNotify)
+{
+    private readonly Lock _locker = new();
+    private volatile bool _subscribed;
+
+    public void Subscribe()
+    {
+        if (_subscribed)
+        {
+            return;
+        }
+
+        lock (_locker)
+        {
+            if (_subscribed)
+            {
+                return;
+            }
+
+            _subscribed = true;
+
+            cacheNotify.Subscribe(async i =>
+            {
+                using var scope = serviceProvider.CreateScope();
+
+                var scopeClass = scope.ServiceProvider.GetService<BaseStorageSettingsListenerScope>();
+                var (storageSettingsHelper, settingsManager) = scopeClass;
+                var settings = await settingsManager.LoadAsync<StorageSettings>(i.TenantId);
+                if (i.Name == settings.Module)
+                {
+                    await storageSettingsHelper.ClearAsync(settings);
+                }
+
+                var cdnSettings = await settingsManager.LoadAsync<CdnStorageSettings>(i.TenantId);
+                if (i.Name == cdnSettings.Module)
+                {
+                    await storageSettingsHelper.ClearAsync(cdnSettings);
+                }
+            }, CacheNotifyAction.Remove);
+        }
+    }
+}
+
+/// <summary>
+/// The base storage settings.
+/// </summary>
+public abstract class BaseStorageSettings<T> : ISettings<BaseStorageSettings<T>> where T : class, ISettings<T>, new()
+{
+    /// <summary>
+    /// The storage name.
+    /// </summary>
+    /// <example>LocalStorage</example>
+    public string Module { get; set; }
+
+    /// <summary>
+    /// The storage properties.
+    /// </summary>
+    /// <example>
+    /// {
+    ///   "region": "eu-central-1",
+    ///   "bucket": "tenant-files"
+    /// }
+    /// </example>
+    public Dictionary<string, string> Props { get; set; }
+
+    [JsonIgnore]
+    public virtual Func<DataStoreConsumer, DataStoreConsumer> Switch => d => d;
+
+    internal ICacheNotify<DataStoreCacheItem> Cache { get; set; }
+
+    public static Guid ID { get; }
+
+    public BaseStorageSettings<T> GetDefault()
+    {
+        throw new NotImplementedException();
+    }
+
+    /// <summary>
+    /// The date and time when the storage settings were last modified.
+    /// </summary>
+    /// <example>2025-01-01T12:00:00Z</example>
+    public DateTime LastModified { get; set; }
+}
+
+/// <summary>
+/// The storage settings.
+/// </summary>
+public class StorageSettings : BaseStorageSettings<StorageSettings>, ISettings<StorageSettings>
+{
+    /// <summary>
+    /// The storage ID.
+    /// </summary>
+    public static new Guid ID => new("F13EAF2D-FA53-44F1-A6D6-A5AEDA46FA2B");
+
+    StorageSettings ISettings<StorageSettings>.GetDefault()
+    {
+        return new StorageSettings();
+    }
+}
+
+/// <summary>
+/// The CDN storage settings.
+/// </summary>
+[Scope]
+public class CdnStorageSettings : BaseStorageSettings<CdnStorageSettings>, ISettings<CdnStorageSettings>
+{
+    /// <summary>
+    /// The CDN storage ID.
+    /// </summary>
+    public static new Guid ID => new("0E9AE034-F398-42FE-B5EE-F86D954E9FB2");
+
+    [JsonIgnore]
+    public override Func<DataStoreConsumer, DataStoreConsumer> Switch => d => d.Cdn;
+
+    CdnStorageSettings ISettings<CdnStorageSettings>.GetDefault()
+    {
+        return new CdnStorageSettings();
+    }
+}
+
+[Scope]
+public class StorageSettingsHelper
+{
+    private readonly StorageFactoryConfig _storageFactoryConfig;
+    private readonly ICacheNotify<DataStoreCacheItem> _cache;
+    private readonly TenantManager _tenantManager;
+    private readonly SettingsManager _settingsManager;
+    private readonly ConsumerFactory _consumerFactory;
+    private readonly IServiceProvider _serviceProvider;
+    private IDataStore _dataStore;
+
+    public StorageSettingsHelper(
+        BaseStorageSettingsListener baseStorageSettingsListener,
+        StorageFactoryConfig storageFactoryConfig,
+        ICacheNotify<DataStoreCacheItem> cache,
+        TenantManager tenantManager,
+        SettingsManager settingsManager,
+        ConsumerFactory consumerFactory,
+        IServiceProvider serviceProvider)
+    {
+        baseStorageSettingsListener.Subscribe();
+        _storageFactoryConfig = storageFactoryConfig;
+        _cache = cache;
+        _tenantManager = tenantManager;
+        _settingsManager = settingsManager;
+        _consumerFactory = consumerFactory;
+        _serviceProvider = serviceProvider;
+    }
+
+    public async Task<bool> SaveAsync<T>(BaseStorageSettings<T> baseStorageSettings) where T : class, ISettings<T>, new()
+    {
+        await ClearDataStoreCacheAsync();
+
+        return await _settingsManager.SaveAsync(baseStorageSettings);
+    }
+
+    public async Task ClearAsync<T>(BaseStorageSettings<T> baseStorageSettings) where T : class, ISettings<T>, new()
+    {
+        baseStorageSettings.Module = null;
+        baseStorageSettings.Props = null;
+        await SaveAsync(baseStorageSettings);
+    }
+
+    public async Task<DataStoreConsumer> DataStoreConsumerAsync<T>(BaseStorageSettings<T> baseStorageSettings) where T : class, ISettings<T>, new()
+    {
+        if (string.IsNullOrEmpty(baseStorageSettings.Module) || baseStorageSettings.Props == null)
+        {
+            return new DataStoreConsumer();
+        }
+
+        var consumer = _consumerFactory.GetByKey<DataStoreConsumer>(baseStorageSettings.Module);
+
+        if (!await consumer.GetIsSetAsync())
+        {
+            return new DataStoreConsumer();
+        }
+
+        var dataStoreConsumer = (DataStoreConsumer)consumer.Clone();
+
+        foreach (var prop in baseStorageSettings.Props)
+        {
+            await dataStoreConsumer.SetAsync(prop.Key, prop.Value);
+        }
+
+        return dataStoreConsumer;
+    }
+
+    public async Task<IDataStore> DataStoreAsync<T>(BaseStorageSettings<T> baseStorageSettings) where T : class, ISettings<T>, new()
+    {
+        if (_dataStore != null)
+        {
+            return _dataStore;
+        }
+
+        var dataStoreConsumer = await DataStoreConsumerAsync(baseStorageSettings);
+        var handlerType = dataStoreConsumer.HandlerType;
+        if (handlerType == null)
+        {
+            return null;
+        }
+
+        return _dataStore = await ((IDataStore)_serviceProvider.GetService(handlerType))
+            .ConfigureAsync(_tenantManager.GetCurrentTenantId().ToString(), null, null, dataStoreConsumer, null);
+    }
+
+    internal async Task ClearDataStoreCacheAsync()
+    {
+        var path = TenantPath.CreatePath(_tenantManager.GetCurrentTenantId());
+
+        foreach (var module in _storageFactoryConfig.GetModuleList("", true))
+        {
+            await _cache.PublishAsync(new DataStoreCacheItem { TenantId = path, Module = module }, CacheNotifyAction.Remove);
+        }
+    }
+}
+
+[Scope]
+public record BaseStorageSettingsListenerScope(
+    StorageSettingsHelper StorageSettingsHelper,
+    SettingsManager SettingsManager);

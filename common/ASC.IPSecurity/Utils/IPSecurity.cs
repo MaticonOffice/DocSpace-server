@@ -1,0 +1,190 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Core.Users;
+
+namespace ASC.IPSecurity;
+
+[Scope]
+public class IPSecurity(
+    IConfiguration configuration,
+    IHttpContextAccessor httpContextAccessor,
+    AuthContext authContext,
+    TenantManager tenantManager,
+    IPRestrictionsService iPRestrictionsService,
+    UserManager userManager,
+    SettingsManager settingsManager,
+    ILogger<IPSecurity> logger)
+{
+    private string CurrentIpForTest
+    {
+        get
+        {
+            return field ??= configuration["ipsecurity:test"];
+        }
+    }
+
+    private string MyNetworks
+    {
+        get
+        {
+            return field ??= configuration["ipsecurity:mynetworks"];
+        }
+    }
+
+    private bool? _ipSecurityEnabled;
+    private bool IpSecurityEnabled
+    {
+        get
+        {
+            if (_ipSecurityEnabled.HasValue)
+            {
+                return _ipSecurityEnabled.Value;
+            }
+
+            var hideSettings = configuration.GetSection("web:hide-settings").Get<string[]>() ?? [];
+            _ipSecurityEnabled = !hideSettings.Contains("IpSecurity", StringComparer.CurrentCultureIgnoreCase);
+            return _ipSecurityEnabled.Value;
+        }
+    }
+
+
+    public async Task<bool> VerifyAsync()
+    {
+        var tenant = tenantManager.GetCurrentTenant();
+
+        if (!IpSecurityEnabled)
+        {
+            return true;
+        }
+
+        var enable = (await settingsManager.LoadAsync<IPRestrictionsSettings>()).Enable;
+
+        if (!enable)
+        {
+            return true;
+        }
+
+        if (httpContextAccessor?.HttpContext == null)
+        {
+            return true;
+        }
+
+        if (tenant == null || authContext.CurrentAccount.ID == tenant.OwnerId && !authContext.IsFromInvite())
+        {
+            return true;
+        }
+
+        string requestIps = null;
+        try
+        {
+            var restrictions = (await iPRestrictionsService.GetAsync(tenant.Id)).ToList();
+
+            if (restrictions.Count == 0)
+            {
+                return true;
+            }
+
+            requestIps = CurrentIpForTest;
+
+            if (string.IsNullOrWhiteSpace(requestIps))
+            {
+                requestIps = httpContextAccessor.HttpContext.Connection.RemoteIpAddress?.ToString();
+            }
+
+            var ips = string.IsNullOrWhiteSpace(requestIps)
+                          ? []
+                          : requestIps.Split([",", " "], StringSplitOptions.RemoveEmptyEntries);
+
+            var isDocSpaceAdmin = await userManager.IsUserInGroupAsync(authContext.CurrentAccount.ID, Constants.GroupAdmin.ID);
+
+            if (ips.Any(requestIp => restrictions.Exists(restriction => (!restriction.ForAdmin || isDocSpaceAdmin) && IPAddressRange.MatchIPs(requestIp, restriction.Ip))))
+            {
+                return true;
+            }
+
+            if (IsMyNetwork(ips))
+            {
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.ErrorCantVerifyRequest(requestIps ?? "", tenant, ex);
+
+            return false;
+        }
+
+        logger.InformationRestricted(requestIps, tenant, httpContextAccessor.HttpContext.Request.GetDisplayUrl());
+
+        return false;
+    }
+
+
+
+    private bool IsMyNetwork(string[] ips)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(MyNetworks))
+            {
+                var myNetworkIps = MyNetworks.Split([",", " "], StringSplitOptions.RemoveEmptyEntries);
+
+                if (ips.Any(requestIp => myNetworkIps.Any(ipAddress => IPAddressRange.MatchIPs(requestIp, ipAddress))))
+                {
+                    return true;
+                }
+            }
+
+            var hostAddresses = Dns.GetHostAddresses(Dns.GetHostName());
+
+            var localIPs = new List<IPAddress> { IPAddress.IPv6Loopback, IPAddress.Loopback };
+
+            localIPs.AddRange(hostAddresses.Where(ip => ip.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6));
+
+            foreach (var ipAddress in localIPs)
+            {
+                if (ips.Contains(ipAddress.ToString()))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.ErrorCantVerifyLocalNetWork(string.Join(",", ips), ex);
+        }
+
+        return false;
+    }
+}

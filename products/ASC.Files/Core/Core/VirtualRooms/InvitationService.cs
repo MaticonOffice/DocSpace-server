@@ -1,0 +1,462 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.MessagingSystem.EF.Context;
+
+namespace ASC.Files.Core.VirtualRooms;
+
+[Scope]
+public class InvitationService(
+    CommonLinkUtility commonLinkUtility,
+    IDaoFactory daoFactory,
+    InvitationValidator invitationValidator,
+    TenantManager tenantManager,
+    FileSecurity fileSecurity,
+    UserManager userManager,
+    IPSecurity.IPSecurity iPSecurity,
+    AuthContext authContext,
+    IDbContextFactory<MessagesContext> dbContextFactory,
+    FilesMessageService filesMessageService,
+    DisplayUserSettingsHelper displayUserSettingsHelper,
+    IDistributedLockProvider distributedLockProvider,
+    UsersInRoomChecker usersInRoomChecker,
+    EmailValidationKeyModelHelper validationHelper)
+{
+    public string GetInvitationLink(Guid linkId, Guid createdBy)
+    {
+        var key = invitationValidator.MakeIndividualLinkKey(linkId, createdBy);
+        return commonLinkUtility.GetConfirmationUrl(key, ConfirmType.LinkInvite, createdBy);
+    }
+
+    public string GetInvitationLink(string email, FileShare share, Guid createdBy, string roomId, string culture = null)
+    {
+        var type = FileSecurity.GetTypeByShare(share);
+        var link = commonLinkUtility.GetInvitationLink(email, type, createdBy, culture) + $"&roomId={roomId}";
+        return link;
+    }
+
+    public async Task<Validation> ConfirmAsync(string key, string email, EmployeeType employeeType, string roomId = null, Guid? userId = null)
+    {
+        if (!await iPSecurity.VerifyAsync())
+        {
+            throw new SecurityException();
+        }
+
+        var data = await GetLinkDataAsync(key, email, null, employeeType, userId);
+        var validation = new Validation { Result = data.Result };
+
+        if (data.Result is EmailValidationKeyProvider.ValidationResult.Invalid or EmailValidationKeyProvider.ValidationResult.Expired)
+        {
+            return validation;
+        }
+
+        var isAuth = authContext.IsAuthenticated;
+
+        (validation.RoomId, validation.Title, validation.IsAgent) = data.LinkType switch
+        {
+            InvitationLinkType.Individual when !string.IsNullOrEmpty(roomId) => await GetRoomDataAsync(roomId, async entry =>
+            {
+                return entry switch
+                {
+                    FileEntry<int> entryInt => await fileSecurity.CanReadAsync(entryInt, data.User.Id),
+                    FileEntry<string> entryString => await fileSecurity.CanReadAsync(entryString, data.User.Id),
+                    _ => false
+                };
+            }),
+            InvitationLinkType.CommonToRoom when !isAuth => await GetRoomDataAsync(data.RoomId),
+            InvitationLinkType.CommonToRoom => await GetRoomDataAsync(data.RoomId, async entry =>
+            {
+                return entry switch
+                {
+                    Folder<int> entryInt => await ResolveAccessAsync(entryInt),
+                    Folder<string> entryString => await ResolveAccessAsync(entryString),
+                    _ => false
+                };
+
+                async Task<bool> ResolveAccessAsync<T>(Folder<T> folder)
+                {
+                    var accountId = authContext.CurrentAccount.ID;
+                    if (folder.CreateBy == accountId)
+                    {
+                        return true;
+                    }
+
+                    if (await fileSecurity.CanReadAsync(folder))
+                    {
+                        if (!await userManager.IsDocSpaceAdminAsync(accountId))
+                        {
+                            return true;
+                        }
+
+                        var record = (await fileSecurity.GetSharesAsync(folder, [accountId]))
+                            .FirstOrDefault(x => x.SubjectType == SubjectType.User);
+
+                        if (record != null)
+                        {
+                            return true;
+                        }
+                    }
+
+                    var tenantId = tenantManager.GetCurrentTenantId();
+                    await using var context = await dbContextFactory.CreateDbContextAsync();
+
+                    var query = context.AuditEvents.Where(x => x.TenantId == tenantId && x.Action == (int)MessageAction.RoomRemoveUser);
+
+                    if (entry.ProviderEntry)
+                    {
+                        var match = Selectors.Pattern.Match(data.RoomId);
+                        if (!match.Success)
+                        {
+                            return false;
+                        }
+
+                        query = query.Where(x => x.Target.StartsWith($"{match.Groups[2]}-{entry.ProviderId}-"));
+                    }
+                    else
+                    {
+                        query = query.Where(x => x.Target == data.RoomId);
+                    }
+
+                    var currentUserId = authContext.CurrentAccount.ID;
+
+                    await foreach (var auditEvent in query.ToAsyncEnumerable())
+                    {
+                        var description = JsonSerializer.Deserialize<List<string>>(auditEvent.DescriptionRaw);
+                        var info = JsonSerializer.Deserialize<EventDescription<JsonElement>>(description.Last());
+
+                        if (!info.UserIds.Contains(currentUserId) || auditEvent.UserId == currentUserId)
+                        {
+                            continue;
+                        }
+
+                        validation.Result = EmailValidationKeyProvider.ValidationResult.UserExcluded;
+                        return false;
+                    }
+
+                    var type = await userManager.GetUserTypeAsync(currentUserId);
+
+                    ProcessForAgent(folder, type, data);
+
+                    if (FileSecurity.PaidShares.Contains(data.Share) && type is EmployeeType.Guest or EmployeeType.User)
+                    {
+                        data.Share = FileSecurity.GetHighFreeRole(folder.FolderType);
+
+                        if (data.Share == FileShare.None || !FileSecurity.IsAvailableAccess(data.Share, SubjectType.InvitationLink, folder.FolderType))
+                        {
+                            validation.Result = EmailValidationKeyProvider.ValidationResult.QuotaFailed;
+                            return false;
+                        }
+                    }
+
+                    var (success, validationResult) = await ProcessShare(folder, currentUserId, data);
+                    if (!success)
+                    {
+                        validation.Result = validationResult;
+                        return false;
+                    }
+
+                    var user = await userManager.GetUsersAsync(currentUserId);
+
+                    switch (entry)
+                    {
+                        case FileEntry<int> entryInt:
+                            await filesMessageService.SendAsync(MessageAction.RoomCreateUser, entryInt, currentUserId, data.Share, null, true,
+                                user.DisplayUserName(false, displayUserSettingsHelper));
+                            break;
+                        case FileEntry<string> entryString:
+                            await filesMessageService.SendAsync(MessageAction.RoomCreateUser, entryString, currentUserId, data.Share, null, true,
+                                user.DisplayUserName(false, displayUserSettingsHelper));
+                            break;
+                    }
+
+                    return true;
+                }
+            }),
+            _ => (null, null, false)
+        };
+
+        if (isAuth || data.Result is EmailValidationKeyProvider.ValidationResult.UserExisted)
+        {
+            if (validation.Result is not (EmailValidationKeyProvider.ValidationResult.UserExcluded or EmailValidationKeyProvider.ValidationResult.QuotaFailed))
+            {
+                validation.Result = EmailValidationKeyProvider.ValidationResult.UserExisted;
+            }
+
+            return validation;
+        }
+
+        if (validation.Result is EmailValidationKeyProvider.ValidationResult.Ok)
+        {
+            validation.Email = email;
+            return validation;
+        }
+
+        validation.RoomId = null;
+        validation.Title = null;
+
+        return validation;
+    }
+
+    public async Task<InvitationLinkData> GetLinkDataAsync(string key, string email, ConfirmType? confirmType, EmployeeType employeeType = EmployeeType.All, Guid? userId = null)
+    {
+        if (confirmType is ConfirmType.EmpInvite)
+        {
+            var (validationResult, _) = await validationHelper.ValidateAsync(new EmailValidationKeyModel
+            {
+                Key = key,
+                Email = email,
+                Type = ConfirmType.EmpInvite,
+                EmplType = employeeType,
+                UiD = userId
+            });
+
+            return new InvitationLinkData
+            {
+                Result = validationResult,
+                ConfirmType = confirmType,
+                EmployeeType = employeeType,
+                LinkType = InvitationLinkType.Individual
+            };
+        }
+
+        var result = await invitationValidator.ValidateAsync(key, email, employeeType, userId);
+        var data = new InvitationLinkData
+        {
+            Result = result.Status,
+            LinkType = result.LinkType,
+            ConfirmType = result.ConfirmType,
+            User = result.User,
+            EmployeeType = employeeType,
+            LinkId = result.LinkId
+        };
+
+        if (result.LinkType is not InvitationLinkType.CommonToRoom)
+        {
+            return data;
+        }
+
+        var securityDao = daoFactory.GetSecurityDao<string>();
+        var record = await securityDao.GetSharesAsync([result.LinkId])
+            .FirstOrDefaultAsync(s => s.SubjectType == SubjectType.InvitationLink);
+
+        if (record is not { SubjectType: SubjectType.InvitationLink })
+        {
+            data.Result = EmailValidationKeyProvider.ValidationResult.Invalid;
+            return data;
+        }
+
+        var linkOwner = await userManager.GetUsersAsync(record.Owner);
+
+        if (linkOwner.Status == EmployeeStatus.Terminated || linkOwner.Removed)
+        {
+            data.Result = EmailValidationKeyProvider.ValidationResult.Invalid;
+            return data;
+        }
+
+        data.Result = record.Options.IsExpired
+            ? EmailValidationKeyProvider.ValidationResult.Expired
+            : EmailValidationKeyProvider.ValidationResult.Ok;
+
+        if (data.Result == EmailValidationKeyProvider.ValidationResult.Ok &&
+            record.Options.MaxUseCount.HasValue &&
+            record.Options.MaxUseCount.Value <= record.Options.CurrentUseCount)
+        {
+            data.Result = EmailValidationKeyProvider.ValidationResult.QuotaFailed;
+        }
+
+        data.Share = record.Share;
+        data.RoomId = record.EntryId;
+        data.EmployeeType = FileSecurity.GetTypeByShare(record.Share);
+
+        return data;
+    }
+
+    public async Task AddUserToRoomByInviteAsync(InvitationLinkData data, UserInfo user, bool quotaLimit = false)
+    {
+        if (data is not { LinkType: InvitationLinkType.CommonToRoom })
+        {
+            return;
+        }
+
+        var success = int.TryParse(data.RoomId, out var id);
+        var tenantId = tenantManager.GetCurrentTenantId();
+
+        await using (await distributedLockProvider.TryAcquireFairLockAsync(LockKeyHelper.GetUsersInRoomCountCheckKey(tenantId)))
+        {
+            if (success)
+            {
+                await AddToRoomAsync(id);
+            }
+            else
+            {
+                await AddToRoomAsync(data.RoomId);
+            }
+        }
+
+        return;
+
+        async Task AddToRoomAsync<T>(T roomId)
+        {
+            await usersInRoomChecker.CheckAppend();
+            var room = await daoFactory.GetFolderDao<T>().GetFolderAsync(roomId);
+            var type = await userManager.GetUserTypeAsync(user);
+
+            ProcessForAgent(room, type, data);
+
+            if (quotaLimit && FileSecurity.PaidShares.Contains(data.Share))
+            {
+                data.Share = FileSecurity.GetHighFreeRole(room.FolderType);
+                if (data.Share == FileShare.None || !FileSecurity.IsAvailableAccess(data.Share, SubjectType.InvitationLink, room.FolderType))
+                {
+                    return;
+                }
+            }
+
+            var (success, _) = await ProcessShare(room, user.Id, data);
+            if (!success)
+            {
+                return;
+            }
+
+            await filesMessageService.SendAsync(MessageAction.RoomCreateUser, room, user.Id, data.Share, null, true,
+                user.DisplayUserName(false, displayUserSettingsHelper));
+        }
+    }
+
+    private async Task<(string, string, bool)> GetRoomDataAsync(string roomId, Func<FileEntry, Task<bool>> accessResolver = null)
+    {
+        if (int.TryParse(roomId, out var intId))
+        {
+            var internalRoom = await daoFactory.GetFolderDao<int>().GetFolderAsync(intId);
+            if (!await CheckRoomAsync(internalRoom))
+            {
+                return (null, null, false);
+            }
+
+            return (internalRoom.Id.ToString(), internalRoom.Title, internalRoom.FolderType is FolderType.AiRoom);
+        }
+
+        var provider = await daoFactory.ProviderDao.GetProviderInfoByEntryIdAsync(roomId);
+        if (provider == null || string.IsNullOrEmpty(provider.FolderId))
+        {
+            return (null, null, false);
+        }
+
+        var thirdPartyRoom = await daoFactory.GetFolderDao<string>().GetFolderAsync(provider.FolderId);
+        if (!await CheckRoomAsync(thirdPartyRoom))
+        {
+            return (null, null, false);
+        }
+
+        return (thirdPartyRoom.Id, thirdPartyRoom.Title, false);
+
+        async Task<bool> CheckRoomAsync<T>(Folder<T> room)
+        {
+            if (room is not { IsRoom: true })
+            {
+                return false;
+            }
+
+            if (accessResolver != null)
+            {
+                return await accessResolver(room);
+            }
+
+            return true;
+        }
+    }
+
+    private static void ProcessForAgent<T>(Folder<T> folder, EmployeeType type, InvitationLinkData data)
+    {
+        if (folder.FolderType == FolderType.AiRoom && 
+            type == EmployeeType.Guest && 
+            data.Share is FileShare.RoomManager or FileShare.ContentCreator)
+        {
+            data.Share = FileShare.Read;
+        }
+    }
+
+    private async Task<(bool, EmailValidationKeyProvider.ValidationResult)> ProcessShare<T>(Folder<T> folder, Guid userId, InvitationLinkData data)
+    {
+        if (data.LinkId == Guid.Empty)
+        {
+            await fileSecurity.ShareAsync(folder.Id, FileEntryType.Folder, userId, data.Share);
+        }
+        else
+        {
+            await using (await distributedLockProvider.TryAcquireFairLockAsync($"link_use_count_check_{data.LinkId}"))
+            {
+                var link = (await fileSecurity.GetSharesAsync(folder, [data.LinkId])).FirstOrDefault();
+
+                if (link != null &&
+                    link.Options.MaxUseCount.HasValue &&
+                    link.Options.MaxUseCount.Value <= link.Options.CurrentUseCount)
+                {
+                    return (false, EmailValidationKeyProvider.ValidationResult.QuotaFailed);
+                }
+
+                await fileSecurity.ShareAsync(folder.Id, FileEntryType.Folder, userId, data.Share);
+
+                if (link != null)
+                {
+                    link.Options.CurrentUseCount += 1;
+                    await fileSecurity.ShareAsync(link.EntryId, link.EntryType, link.Subject, link.Share, link.SubjectType, link.Options, link.Owner);
+                }
+            }
+        }
+
+        return (true, EmailValidationKeyProvider.ValidationResult.Ok);
+    }
+}
+
+public class Validation
+{
+    public EmailValidationKeyProvider.ValidationResult Result { get; set; }
+    public string RoomId { get; set; }
+    public string Title { get; set; }
+    public string Email { get; set; }
+    public bool IsAgent { get; set; }
+}
+
+public class InvitationLinkData
+{
+    public string RoomId { get; set; }
+    public FileShare Share { get; set; }
+    public InvitationLinkType LinkType { get; set; }
+    public ConfirmType? ConfirmType { get; set; }
+    public EmployeeType EmployeeType { get; set; }
+    public EmailValidationKeyProvider.ValidationResult Result { get; set; }
+    public UserInfo User { get; set; }
+    public Guid LinkId { get; set; }
+    public bool IsCorrect => Result == EmailValidationKeyProvider.ValidationResult.Ok;
+}

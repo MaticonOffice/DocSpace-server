@@ -1,0 +1,237 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.common.messaging.configuration;
+
+import com.asc.common.service.transfer.message.*;
+import java.util.Map;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+import org.springframework.amqp.core.AcknowledgeMode;
+import org.springframework.amqp.core.AmqpTemplate;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.*;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import tools.jackson.databind.json.JsonMapper;
+
+/**
+ * Configuration class for setting up RabbitMQ messaging infrastructure. It includes configuration
+ * for queues, exchanges, bindings, message converters, and listener container factories.
+ *
+ * <p>This class reads properties prefixed with "spring.cloud.messaging.rabbitmq" from the
+ * application configuration and sets up the necessary beans.
+ *
+ * <p>This configuration is only loaded when RabbitMQ classes are available on the classpath.
+ */
+@Slf4j
+@Setter
+@Getter
+@Configuration
+@ConditionalOnClass(name = "com.rabbitmq.client.Connection")
+@ConfigurationProperties(prefix = "spring.cloud.messaging.rabbitmq")
+public class RabbitListenerContainerFactoryConfiguration {
+  private int prefetch = 500;
+  private int batchSize = 20;
+
+  /**
+   * Bean for creating and configuring a Jackson2JsonMessageConverter instance.
+   *
+   * @return a configured Jackson2JsonMessageConverter instance
+   */
+  @Bean
+  public MessageConverter jsonMessageConverter() {
+    log.info("Building a json message converter");
+
+    var messageConverter = new JacksonJsonMessageConverter(JsonMapper.builder().build());
+    var classMapper = new DefaultJacksonJavaTypeMapper();
+    classMapper.setTrustedPackages("*");
+    classMapper.setIdClassMapping(
+        Map.of(
+            "audit", AuditMessage.class,
+            "clientRemoved", ClientRemovedEvent.class,
+            "clientCacheRemove", ClientCacheRemoveEvent.class,
+            "clientCacheTenantRemove", ClientCacheTenantRemoveEvent.class,
+            "retrieveAuthorization", RetrieveAuthorizationMessage.class,
+            "saveAuthorization", SaveAuthorizationMessage.class,
+            "retrieveClient", RetrieveClientMessage.class,
+            "clientRetrieved", ClientRetrievedEvent.class,
+            "tenantClientsRemoved", TenantClientsRemovedEvent.class,
+            "userClientsRemoved", UserClientsRemovedEvent.class));
+    messageConverter.setClassMapper(classMapper);
+    messageConverter.setTypePrecedence(JacksonJavaTypeMapper.TypePrecedence.TYPE_ID);
+    return messageConverter;
+  }
+
+  /**
+   * Bean for creating and configuring a RabbitListenerContainerFactory instance.
+   *
+   * @param connectionFactory the RabbitMQ connection factory
+   * @param converter the message converter to use
+   * @return a configured RabbitListenerContainerFactory instance
+   */
+  @Bean("rabbitListenerContainerFactory")
+  public RabbitListenerContainerFactory<?> rabbitFactory(
+      ConnectionFactory connectionFactory, MessageConverter converter) {
+    log.info("Building a default rabbit listener container factory");
+
+    var factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setMessageConverter(converter);
+    return factory;
+  }
+
+  /**
+   * Bean for creating and configuring a batch RabbitListenerContainerFactory instance.
+   *
+   * @param rabbitConnectionFactory the RabbitMQ connection factory
+   * @param converter the message converter to use
+   * @return a configured SimpleRabbitListenerContainerFactory instance for batch processing
+   */
+  @Bean("batchRabbitListenerContainerFactory")
+  public RabbitListenerContainerFactory<SimpleMessageListenerContainer>
+      batchRabbitListenerContainerFactory(
+          ConnectionFactory rabbitConnectionFactory, MessageConverter converter) {
+    MDC.put("prefetch", String.valueOf(prefetch));
+    MDC.put("batch", String.valueOf(batchSize));
+    log.info("Building a batch rabbit listener container factory with manual ack");
+    MDC.clear();
+
+    var factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(rabbitConnectionFactory);
+    factory.setMessageConverter(converter);
+    factory.setPrefetchCount(prefetch);
+    factory.setAcknowledgeMode(AcknowledgeMode.AUTO);
+    factory.setBatchListener(true);
+    factory.setBatchSize(batchSize);
+    factory.setConsumerBatchEnabled(true);
+    return factory;
+  }
+
+  /**
+   * Configures a {@link SimpleRabbitListenerContainerFactory} bean for RabbitMQ listeners with
+   * manual acknowledgment. This factory ensures that messages are acknowledged explicitly by the
+   * listener, allowing for better control over message processing and error handling. It is
+   * configured with a prefetch count of 1 to process one message at a time, reducing the risk of
+   * message loss or unprocessed batches.
+   *
+   * @param connectionFactory the RabbitMQ {@link ConnectionFactory} to be used for establishing
+   *     connections.
+   * @return a configured {@link SimpleRabbitListenerContainerFactory} with manual acknowledgment
+   *     and single-message prefetch.
+   */
+  @Bean("rabbitSingleManualContainerFactory")
+  public SimpleRabbitListenerContainerFactory rabbitSingleManualContainerFactory(
+      ConnectionFactory connectionFactory, MessageConverter messageConverter) {
+    log.info("Building a single manual listener container factory");
+
+    SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setMessageConverter(messageConverter);
+    factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+    factory.setConcurrentConsumers(4);
+    factory.setMaxConcurrentConsumers(10);
+    factory.setPrefetchCount(1);
+    return factory;
+  }
+
+  /**
+   * Configures a {@link SimpleRabbitListenerContainerFactory} bean optimized for RPC workloads.
+   * Uses higher prefetch count for better throughput with auto-acknowledgment (sufficient for RPC
+   * since we wait for response). Supports direct reply-to pattern for reduced latency.
+   *
+   * @param connectionFactory the RabbitMQ {@link ConnectionFactory} to be used for establishing
+   *     connections.
+   * @param messageConverter the {@link MessageConverter} for message serialization.
+   * @return a configured {@link SimpleRabbitListenerContainerFactory} optimized for RPC.
+   */
+  @Bean("rabbitRpcContainerFactory")
+  public SimpleRabbitListenerContainerFactory rabbitRpcContainerFactory(
+      ConnectionFactory connectionFactory, MessageConverter messageConverter) {
+    log.info("Building an RPC simple rabbit listener container factory");
+
+    var factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setMessageConverter(messageConverter);
+    factory.setAcknowledgeMode(AcknowledgeMode.AUTO);
+    factory.setConcurrentConsumers(4);
+    factory.setMaxConcurrentConsumers(16);
+    factory.setPrefetchCount(20);
+    return factory;
+  }
+
+  /**
+   * Creates and configures a RabbitTemplate optimized for synchronous RPC calls. Uses direct
+   * reply-to pattern which leverages RabbitMQ's pseudo-queue (amq.rabbitmq.reply-to) for optimized
+   * request-response without creating temporary queues.
+   *
+   * @param connectionFactory the RabbitMQ connection factory.
+   * @param converter the message converter to use.
+   * @return a configured RabbitTemplate instance optimized for RPC.
+   */
+  @Bean("rpcRabbitTemplate")
+  public RabbitTemplate rpcRabbitTemplate(
+      ConnectionFactory connectionFactory, MessageConverter converter) {
+    log.info("Building an RPC-optimized rabbit template with direct reply-to");
+
+    var rabbitTemplate = new RabbitTemplate(connectionFactory);
+    rabbitTemplate.setMessageConverter(converter);
+    rabbitTemplate.setUseDirectReplyToContainer(true);
+    rabbitTemplate.setReplyTimeout(600);
+    return rabbitTemplate;
+  }
+
+  /**
+   * Creates and configures an AmqpTemplate instance.
+   *
+   * @param connectionFactory the RabbitMQ connection factory
+   * @param converter the message converter to use
+   * @return a configured AmqpTemplate instance
+   */
+  public AmqpTemplate rabbitTemplate(
+      ConnectionFactory connectionFactory, MessageConverter converter) {
+    log.info("Building an amqp template");
+
+    var rabbitTemplate = new RabbitTemplate(connectionFactory);
+    rabbitTemplate.setMessageConverter(converter);
+    return rabbitTemplate;
+  }
+}

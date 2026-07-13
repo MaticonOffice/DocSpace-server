@@ -1,0 +1,506 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using System.Text.Json.Nodes;
+using System.Xml.XPath;
+
+using Microsoft.OpenApi;
+
+using Scalar.AspNetCore;
+
+using Swashbuckle.AspNetCore.SwaggerGen;
+
+namespace ASC.Api.Core.Extensions;
+
+public static class OpenApiExtension
+{
+    public static IServiceCollection AddOpenApi(this IServiceCollection services, IConfiguration configuration, string docVersion = "2.0")
+    {
+        return services.AddSwaggerGen(c =>
+        {
+            var entryAssembly = Assembly.GetEntryAssembly();
+            if (entryAssembly == null)
+            {
+                return;
+            }
+            var assemblyName = entryAssembly.FullName?.Split(',').First();
+            c.ResolveConflictingActions(a => a.First());
+            c.CustomOperationIds(r =>
+            {
+                return r.ActionDescriptor.RouteValues.TryGetValue("action", out var actionName)
+                    ? char.ToLower(actionName[0]) + actionName.Substring(1)
+                    : string.Empty;
+            });
+
+            c.CustomSchemaIds(CustomSchemaId);
+
+            var openApiInfo = new OpenApiInfo
+            {
+                Title = "Api",
+                Version = "3.7.0",
+                Contact = new OpenApiContact
+                {
+                    Name = "API Support",
+                    Email = "support@maticonoffice.ru",
+                    Url = new Uri("https://support.maticonoffice.ru/hc/en-us")
+                }
+            };
+
+            openApiInfo.Extensions ??= new Dictionary<string, IOpenApiExtension>();
+            openApiInfo.Extensions["x-scalar-sdk-installation"] = new JsonNodeExtension(new JsonArray
+            {
+                new JsonObject
+                {
+                    ["lang"] = ScalarTarget.Node.ToStringFast(),
+                    ["description"] = "Install our **MATICONOFFICE SDK** for Node.js from npm:",
+                    ["source"] = "npm install @maticonoffice/docspace-api-sdk"
+                },
+                new JsonObject
+                {
+                    ["lang"] = ScalarTarget.Python.ToStringFast(),
+                    ["description"] = "Install our **MATICONOFFICE SDK** for Python app from pip:",
+                    ["source"] = "pip install maticonoffice-docspace-api-sdk"
+                },
+                new JsonObject
+                {
+                    ["lang"] = ScalarTarget.CSharp.ToStringFast(),
+                    ["description"] = "Install our **MATICONOFFICE SDK** for .Net from nuget:",
+                    ["source"] = "dotnet add package DocSpace.API.SDK"
+                }
+            });
+
+            c.SwaggerDoc(docVersion, openApiInfo);
+
+            c.AddScalarFilters();
+            c.SchemaFilter<SwaggerSchemaCustomFilter>();
+            c.DocumentFilter<LowercaseDocumentFilter>();
+            c.DocumentFilter<ErrorResponseFilter>();
+            c.SchemaFilter<DerivedSchemaFilter>();
+            c.DocumentFilter<HideRouteDocumentFilter>("/api/2.0/capabilities.json");
+            c.DocumentFilter<HideRouteDocumentFilter>("/api/2.0/files/@recent");
+            c.DocumentFilter<TagDescriptionsDocumentFilter>();
+            c.OperationFilter<SwaggerCustomOperationFilter>();
+            c.OperationFilter<ContentTypeOperationFilter>();
+            c.OperationFilter<AllowAnonymousFilter>();
+            c.OperationFilter<RateLimitOperationFilter>();
+            c.DocumentFilter<SwaggerSuccessApiResponseFilter>();
+            c.EnableAnnotations();
+            c.SchemaFilter<CustomInheritanceSchemaFilter>();
+
+            var serverTemplate = configuration.GetValue<string>("openApi:server") ?? "";
+
+            var defaultUrl = configuration.GetValue<string>("openApi:url:default") ?? "";
+            var urlDescription = configuration.GetValue<string>("openApi:url:description") ?? "";
+
+            c.AddServer(new OpenApiServer
+            {
+                Url = serverTemplate,
+                Description = "Server configuration",
+                Variables = new Dictionary<string, OpenApiServerVariable>
+                {
+                    ["baseUrl"] = new()
+                    {
+                        Default = defaultUrl,
+                        Description = urlDescription
+                    }
+                }
+            });
+
+            // ToDo: add security definitions
+            c.AddSecurityDefinition(CookiesManager.AuthCookiesName, new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.ApiKey,
+                In = ParameterLocation.Cookie,
+                Name = CookiesManager.AuthCookiesName,
+                Description = "Use Cookie authentication"
+            });
+
+            // Basic Authentication
+            c.AddSecurityDefinition("Basic", new OpenApiSecurityScheme
+            {
+                Name = "Authorization",
+                Type = SecuritySchemeType.Http,
+                In = ParameterLocation.Header,
+                Scheme = "basic",
+                Description = "Enter your username and password"
+            });
+
+            // JWT Authentication
+            c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+            {
+                Name = "Authorization",
+                Type = SecuritySchemeType.Http,
+                In = ParameterLocation.Header,
+                Scheme = "bearer",
+                BearerFormat = "JWT",
+                Description = "Enter 'Bearer {JWT Token}'"
+            });
+
+            // API Key Authentication
+            c.AddSecurityDefinition("ApiKeyBearer", new OpenApiSecurityScheme
+            {
+                Name = "ApiKeyBearer",
+                Type = SecuritySchemeType.ApiKey,
+                In = ParameterLocation.Header,
+                Description = "Authentication is determined by the 'Authorization' header"
+            });
+
+            var authorizationUrl = configuration.GetValue<string>("openApi:oauth2:authorizationUrl");
+            var tokenUrl = configuration.GetValue<string>("openApi:oauth2:tokenUrl");
+            // OAuth2
+            c.AddSecurityDefinition("OAuth2", new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.OAuth2,
+                In = ParameterLocation.Header,
+                Flows = new OpenApiOAuthFlows
+                {
+                    AuthorizationCode = new OpenApiOAuthFlow
+                    {
+                        AuthorizationUrl = string.IsNullOrEmpty(authorizationUrl) ? new Uri(string.Empty, UriKind.RelativeOrAbsolute) : new Uri(authorizationUrl),
+                        TokenUrl = string.IsNullOrEmpty(tokenUrl) ? new Uri(string.Empty, UriKind.RelativeOrAbsolute) : new Uri(tokenUrl),
+                        Scopes = new Dictionary<string, string>
+                        {
+                            { "read", "Read access to protected resources" },
+                            { "write", "Write access to protected resources" }
+                        }
+                    }
+                },
+                Description = "OAuth2 flow with Authorization Code"
+            });
+
+            var openIdConnectUrl = configuration.GetValue<string>("openApi:openId:openIdConnectUrl");
+            // OpenId Connect
+            c.AddSecurityDefinition("OpenId", new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.OpenIdConnect,
+                In = ParameterLocation.Header,
+                OpenIdConnectUrl = string.IsNullOrEmpty(openIdConnectUrl) ? new Uri(string.Empty, UriKind.RelativeOrAbsolute) : new Uri(openIdConnectUrl),
+                Description = "OpenID Connect authentication"
+            });
+
+            string xmlPath = null;
+            var assemblyLocation = entryAssembly.Location;
+            if (!string.IsNullOrEmpty(assemblyLocation))
+            {
+                var assemblyDirectoryLocation = Path.GetDirectoryName(assemblyLocation);
+                if (!string.IsNullOrEmpty(assemblyDirectoryLocation))
+                {
+                    xmlPath = Path.Combine(assemblyDirectoryLocation, $"{assemblyName}.xml");
+                    if (File.Exists(xmlPath))
+                    {
+                        var doc = new XPathDocument(xmlPath);
+
+                        c.IncludeXmlComments(() => doc);
+                    }
+                }
+            }
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            foreach (var assembly in assemblies)
+            {
+                var xmlFileName = $"{assembly.GetName().Name}.xml";
+                var xmlPathOther = Path.Combine(AppContext.BaseDirectory, xmlFileName);
+
+                if (File.Exists(xmlPathOther) && xmlPathOther != xmlPath)
+                {
+                    c.IncludeXmlComments(xmlPathOther);
+                }
+            }
+        });
+    }
+
+    extension(IApplicationBuilder app)
+    {
+        public IApplicationBuilder UseOpenApi()
+        {
+            var entryAssembly = Assembly.GetEntryAssembly();
+            if (entryAssembly == null)
+            {
+                throw new InvalidOperationException("Entry assembly is null. Cannot configure OpenAPI.");
+            }
+
+            var assemblyName = entryAssembly.FullName.Split(',').First();
+
+            app.UseSwagger(options =>
+            {
+                options.OpenApiVersion = OpenApiSpecVersion.OpenApi3_0;
+                options.RouteTemplate = $"openapi/{assemblyName.ToLower()}/{{documentName}}.{{extension:regex(^(json|ya?ml)$)}}";
+            });
+
+            return app;
+        }
+
+        public IApplicationBuilder UseOpenApiUI(Dictionary<string, string> endpoints)
+        {
+            app.UseSwaggerUI(o =>
+            {
+                o.RoutePrefix = "openapi";
+                o.DocumentTitle = "DocSpace API";
+
+                foreach (var (name, route) in endpoints)
+                {
+                    o.SwaggerEndpoint(route, name);
+                }
+            });
+
+            app.UseEndpoints(endpointRouteBuilder =>
+            {
+                endpointRouteBuilder.MapSwagger();
+
+                endpointRouteBuilder.MapScalarApiReference(((options, context) =>
+                {
+                    options.Servers = [];
+                    options.EnabledTargets = [ScalarTarget.Node, ScalarTarget.CSharp, ScalarTarget.Python];
+                    options.EnabledClients = [ScalarClient.Axios, ScalarClient.Fetch, ScalarClient.Python3, ScalarClient.HttpClient];
+                    options.WithDefaultHttpClient(ScalarTarget.Node, ScalarClient.Axios);
+                    options.AddDocuments(endpoints.Select(r=> new ScalarDocument(r.Key)
+                    {
+                        RoutePattern = r.Value.ToLower(),
+                        IsDefault = r.Key == "asc.files"
+                    }));
+
+                    var authCookie = context.Request.Cookies[CookiesManager.AuthCookiesName]?.ToString();
+                    if (!string.IsNullOrEmpty(authCookie))
+                    {
+                        options.Authentication = new ScalarAuthenticationOptions
+                        {
+                            PreferredSecuritySchemes = [CookiesManager.AuthCookiesName]
+                        };
+
+                        options.AddApiKeyAuthentication(CookiesManager.AuthCookiesName, scheme =>
+                        {
+                            scheme.Name = CookiesManager.AuthCookiesName;
+                            scheme.Value = authCookie;
+                        });
+                    }
+                }));
+            });
+
+            return app;
+        }
+    }
+
+    public static string CustomSchemaId(Type type)
+    {
+        var name = type.Name;
+
+        if (string.IsNullOrEmpty(name))
+        {
+            return name;
+        }
+
+        if (type.IsGenericType)
+        {
+            name = name.Split('`')[0];
+            var genericArgs = string.Join("", type.GetGenericArguments().Select(CustomSchemaId));
+            name += genericArgs;
+        }
+
+        // Fix for nested classes
+        name = name.Replace("+", "_");
+        name = name.Replace("Int32", "Integer");
+        return name;
+    }
+
+    private class AllowAnonymousFilter : IOperationFilter
+    {
+        public void Apply(OpenApiOperation operation, OperationFilterContext context)
+        {
+            var allowAnonymous = context.MethodInfo.DeclaringType.GetCustomAttributes(true)
+                .Union(context.MethodInfo.GetCustomAttributes(true))
+                .OfType<AllowAnonymousAttribute>();
+
+            //var authorizeAttribute = context.MethodInfo.DeclaringType.GetCustomAttributes(true)
+            //    .Union (context.MethodInfo.GetCustomAttributes(true)) .OfType<AuthorizeAttribute>();
+
+
+            if (allowAnonymous.Any())
+            {
+                operation.Security?.Clear();
+            }
+            else
+            {
+                operation.Security ??= new List<OpenApiSecurityRequirement>();
+
+                operation.Security =
+                [
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference(CookiesManager.AuthCookiesName, context.Document)] =  ["read", "write"]
+                    },
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference("Bearer", context.Document)] = []
+                    },
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference("ApiKeyBearer", context.Document)] =   ["read", "write"]
+                    },
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference("Basic", context.Document)] = []
+                    },
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference("OAuth2", context.Document)] = ["read", "write"]
+                    },
+                    new OpenApiSecurityRequirement
+                    {
+                        [ new OpenApiSecuritySchemeReference("OpenId", context.Document)] = []
+                    }
+                ];
+
+                operation.Responses ??= new OpenApiResponses();
+                operation.Responses.Add("401", new OpenApiResponse { Description = "Unauthorized" });
+            }
+
+            //if(authorizeAttribute.Any())
+            //{
+            //    var authorizationDescription = new StringBuilder(" (Auth:");
+            //    var policySelector = authorizeAttribute.Where(a => !string.IsNullOrEmpty(a.Policy)).Select(a => a.Policy);
+            //    var schemaSelector = authorizeAttribute.Where(a => !string.IsNullOrEmpty(a.AuthenticationSchemes)).Select(a => a.AuthenticationSchemes);
+            //    var rolesSelector = authorizeAttribute.Where(a => !string.IsNullOrEmpty(a.Roles)).Select(a => a.Roles);
+            //    ApplyAuthorizeAttribute(authorizationDescription, policySelector, schemaSelector, rolesSelector);
+            //    operation.Summary += authorizationDescription.ToString().TrimEnd(';') + ")";
+            //}
+        }
+
+        private void ApplyAuthorizeAttribute(StringBuilder authorizationDescription, List<string> policySelector, List<string> schemaSelector, List<string> rolesSelector)
+        {
+            if (policySelector.Count != 0)
+            {
+                authorizationDescription.Append($" Policy: {string.Join(", ", policySelector)};");
+            }
+            if (schemaSelector.Count != 0)
+            {
+                authorizationDescription.Append($" Schema: {string.Join(", ", schemaSelector)};");
+            }
+            if (rolesSelector.Count != 0)
+            {
+                authorizationDescription.Append($" Roles: {string.Join(", ", rolesSelector)};");
+            }
+        }
+    }
+
+
+    private class CustomInheritanceSchemaFilter : ISchemaFilter
+    {
+        public void Apply(IOpenApiSchema schema, SchemaFilterContext context)
+        {
+            var type = context.Type;
+
+            if (type.IsEnum || !type.IsClass || type == typeof(object) || IsSystemType(type))
+            {
+                return;
+            }
+
+            var baseType = type.BaseType;
+            if (baseType == null || baseType == typeof(object) || IsSystemType(baseType) || baseType == typeof(BaseEntity))
+            {
+                return;
+            }
+
+            var baseProperties = GetAllBaseTypeProperties(type);
+            if (baseProperties.Count == 0)
+            {
+                return;
+            }
+
+            var openApiSchema = schema as OpenApiSchema;
+
+            var baseTypeSchema = context.SchemaGenerator.GenerateSchema(baseType, context.SchemaRepository);
+
+            var schemaId = CustomSchemaId(baseType);
+
+            context.SchemaRepository.Schemas.TryAdd(schemaId, baseTypeSchema);
+
+            var baseSchemaRef = new OpenApiSchemaReference(schemaId);
+
+            var originalProperties = schema.Properties;
+            var originalRequired = schema.Required;
+
+            var derivedPropertiesSchema = new OpenApiSchema
+            {
+                Type = JsonSchemaType.Object,
+                Properties = new Dictionary<string, IOpenApiSchema>(),
+                Required = new HashSet<string>()
+            };
+
+            foreach (var prop in originalProperties)
+            {
+                if (!baseProperties.Contains(prop.Key.ToLowerInvariant()))
+                {
+                    derivedPropertiesSchema.Properties.Add(prop.Key, prop.Value);
+                    if (originalRequired?.Contains(prop.Key) == true)
+                    {
+                        derivedPropertiesSchema.Required.Add(prop.Key);
+                    }
+                }
+            }
+
+            openApiSchema.AllOf = new List<IOpenApiSchema>
+            {
+                baseSchemaRef,
+                derivedPropertiesSchema
+            };
+
+            openApiSchema.Properties = null;
+            openApiSchema.Required = null;
+            openApiSchema.Type = null;
+        }
+
+        private HashSet<string> GetAllBaseTypeProperties(Type type)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var currentType = type.BaseType;
+
+            while (currentType != null && currentType != typeof(object))
+            {
+                foreach (var prop in currentType.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                {
+                    var propName = char.ToLowerInvariant(prop.Name[0]) + prop.Name.Substring(1);
+                    result.Add(propName);
+                }
+
+                currentType = currentType.BaseType;
+            }
+
+            return result;
+        }
+
+        private static bool IsSystemType(Type type)
+        {
+            return type.Namespace != null && type.Namespace.StartsWith("System");
+        }
+    }
+}

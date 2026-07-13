@@ -1,0 +1,767 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Core.Tenants;
+
+/// <summary>
+/// The current tenant quota.
+/// </summary>
+[DebuggerDisplay("{TenantId} {Name}")]
+public class TenantQuota
+{
+    public static readonly TenantQuota Default = new(Tenant.DefaultTenant)
+    {
+        Name = "Default",
+        MaxFileSize = 25 * 1024 * 1024, // 25Mb
+        MaxTotalSize = long.MaxValue,
+        CountUser = int.MaxValue,
+        CountRoomAdmin = int.MaxValue,
+        CountRoom = int.MaxValue
+    };
+
+    /// <summary>
+    /// The tenant ID.
+    /// </summary>
+    /// <example>1</example>
+    public int TenantId { get; set; }
+
+    /// <summary>
+    /// The tenant name.
+    /// </summary>
+    /// <example>Default</example>
+    public string Name { get; set; }
+
+    /// <summary>
+    /// The tenant price.
+    /// </summary>
+    /// <example>10.0</example>
+    public decimal Price { get; set; }
+
+    /// <summary>
+    /// The tenant price currency symbol.
+    /// </summary>
+    /// <example>$</example>
+    public string PriceCurrencySymbol { get; set; }
+
+    /// <summary>
+    /// The tenant price three-character ISO 4217 currency symbol.
+    /// </summary>
+    /// <example>USD</example>
+    public string PriceISOCurrencySymbol { get; set; }
+
+    /// <summary>
+    /// The tenant product ID.
+    /// </summary>
+    /// <example>64</example>
+    public string ProductId { get; set; }
+
+    /// <summary>
+    /// The service name.
+    /// </summary>
+    /// <example>backup</example>
+    public string ServiceName { get; set; }
+
+    /// <summary>
+    /// The service group.
+    /// </summary>
+    /// <example>services</example>
+    public string ServiceGroup { get; set; }
+
+    /// <summary>
+    /// Specifies if the tenant quota is visible or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Visible { get; set; }
+
+    /// <summary>
+    /// Specifies if the tenant quota applies to the wallet or not
+    /// </summary>
+    /// <example>true</example>
+    public bool Wallet { get; set; }
+
+    /// <summary>
+    /// The quota due date.
+    /// </summary>
+    /// <example>2021-01-01T00:00:00</example>
+    public DateTime? DueDate { get; set; }
+
+    [JsonIgnore]
+    public IReadOnlyList<TenantQuotaFeature> TenantQuotaFeatures { get; private set; }
+
+    private List<string> _featuresList;
+
+    /// <summary>
+    /// The tenant quota features.
+    /// </summary>
+    /// <example>audit,ldap,sso</example>
+    public string Features
+    {
+        get => string.Join(",", _featuresList);
+        set => _featuresList = value != null ? value.Split(' ', ',', ';').ToList() : [];
+    }
+
+    private readonly MaxFileSizeFeature _maxFileSizeFeature;
+
+    /// <summary>
+    /// The tenant maximum file size.
+    /// </summary>
+    /// <example>25000000</example>
+    public long MaxFileSize
+    {
+        get => _maxFileSizeFeature.Value;
+        set => _maxFileSizeFeature.Value = value;
+    }
+
+    private readonly MaxTotalSizeFeature _maxTotalSizeFeature;
+
+    /// <summary>
+    /// The tenant maximum total size.
+    /// </summary>
+    /// <example>25000000000</example>
+    public long MaxTotalSize
+    {
+        get => _maxTotalSizeFeature.Value;
+        set => _maxTotalSizeFeature.Value = value;
+    }
+
+    private readonly CountUserFeature _countUserFeature;
+
+    /// <summary>
+    /// The number of portal users.
+    /// </summary>
+    /// <example>100</example>
+    public int CountUser
+    {
+        get => _countUserFeature.Value;
+        set => _countUserFeature.Value = value;
+    }
+
+    private readonly CountPaidUserFeature _countPaidUserFeature;
+
+    /// <summary>
+    /// The number of portal room administrators.
+    /// </summary>
+    /// <example>10</example>
+    public int CountRoomAdmin
+    {
+        get => _countPaidUserFeature.Value;
+        set => _countPaidUserFeature.Value = value;
+    }
+
+    private readonly UsersInRoomFeature _usersInRoomFeature;
+
+    /// <summary>
+    /// The number of room users.
+    /// </summary>
+    /// <example>50</example>
+    public int UsersInRoom
+    {
+        get => _usersInRoomFeature.Value;
+        set => _usersInRoomFeature.Value = value;
+    }
+
+    private readonly CountRoomFeature _countRoomFeature;
+
+    /// <summary>
+    /// The number of rooms.
+    /// </summary>
+    /// <example>500</example>
+    public int CountRoom
+    {
+        get => _countRoomFeature.Value;
+        set => _countRoomFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _nonProfitFeature;
+
+    /// <summary>
+    /// Specifies if the tenant quota is nonprofit or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool NonProfit
+    {
+        get => _nonProfitFeature.Value;
+        set => _nonProfitFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _trialFeature;
+
+    /// <summary>
+    /// Specifies if the tenant quota is trial or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool Trial
+    {
+        get => _trialFeature.Value;
+        set => _trialFeature.Value = value;
+    }
+
+    private readonly FreeFeature _freeFeature;
+
+    /// <summary>
+    /// Specifies if the tenant quota is free or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool Free
+    {
+        get => _freeFeature.Value;
+        set => _freeFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _updateFeature;
+
+    /// <summary>
+    /// Specifies if the tenant quota is updated or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool Update
+    {
+        get => _updateFeature.Value;
+        set => _updateFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _auditFeature;
+
+    /// <summary>
+    /// Specifies if the audit trail is available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Audit
+    {
+        get => _auditFeature.Value;
+        set => _auditFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _docsEditionFeature;
+
+    /// <summary>
+    /// Specifies if Maticon Office Docs is included in the tenant quota or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool DocsEdition
+    {
+        get => _docsEditionFeature.Value;
+        set => _docsEditionFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _ldapFeature;
+
+    /// <summary>
+    /// Specifies if the LDAP settings are available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Ldap
+    {
+        get => _ldapFeature.Value;
+        set => _ldapFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _ssoFeature;
+
+    /// <summary>
+    /// Specifies if the SSO settings are available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Sso
+    {
+        get => _ssoFeature.Value;
+        set => _ssoFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _statisticFeature;
+
+    /// <summary>
+    /// Specifies if the statistics settings are available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Statistic
+    {
+        get => _statisticFeature.Value;
+        set => _statisticFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _brandingFeature;
+
+    /// <summary>
+    /// Specifies if the branding settings are available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Branding
+    {
+        get => _brandingFeature.Value;
+        set => _brandingFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _customizationFeature;
+
+    /// <summary>
+    /// Specifies if the customization settings are available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Customization
+    {
+        get => _customizationFeature.Value;
+        set => _customizationFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _lifetimeFeature;
+
+    /// <summary>
+    /// Specifies if the license has the lifetime settings or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool Lifetime
+    {
+        get => _lifetimeFeature.Value;
+        set => _lifetimeFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _automationApiFeature;
+
+    /// <summary>
+    /// Specifies if the Automation API is available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool AutomationApi
+    {
+        get => _automationApiFeature.Value;
+        set => _automationApiFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _customFeature;
+
+    /// <summary>
+    /// Specifies if the custom domain URL is available or not.
+    /// </summary>
+    /// <example>false</example>
+    public bool Custom
+    {
+        get => _customFeature.Value;
+        set => _customFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _restoreFeature;
+
+    /// <summary>
+    /// Specifies if the restore is enabled or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Restore
+    {
+        get => _restoreFeature.Value;
+        set => _restoreFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _oauthFeature;
+
+    /// <summary>
+    /// Specifies if Oauth is available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Oauth
+    {
+        get => _oauthFeature.Value;
+        set => _oauthFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _contentSearchFeature;
+
+    /// <summary>
+    /// Specifies if the content search is available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool ContentSearch
+    {
+        get => _contentSearchFeature.Value;
+        set => _contentSearchFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _thirdPartyFeature;
+
+    /// <summary>
+    /// Specifies if the third-party accounts linking is available or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool ThirdParty
+    {
+        get => _thirdPartyFeature.Value;
+        set => _thirdPartyFeature.Value = value;
+    }
+
+    private readonly TenantQuotaFeatureFlag _yearFeature;
+
+    /// <summary>
+    /// Specifies if the tenant quota is yearly subscription or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Year
+    {
+        get => _yearFeature.Value;
+        set => _yearFeature.Value = value;
+    }
+
+    private readonly CountFreeBackupFeature _countFreeBackup;
+
+    /// <summary>
+    /// The number of free backups within a month.
+    /// </summary>
+    /// <example>1</example>
+    public int CountFreeBackup
+    {
+        get => _countFreeBackup.Value;
+        set => _countFreeBackup.Value = value;
+    }
+
+    private readonly WalletFeatureFlag _backup;
+
+    /// <summary>
+    /// Specifies if the backup enabled as a wallet service or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool Backup
+    {
+        get => _backup.Value;
+        set => _backup.Value = value;
+    }
+
+    private readonly CountAIAgentFeature _countAIAgentFeature;
+
+    /// <summary>
+    /// The number of AI agents.
+    /// </summary>
+    /// <example>5</example>
+    public int CountAIAgent
+    {
+        get => _countAIAgentFeature.Value;
+        set => _countAIAgentFeature.Value = value;
+    }
+
+    private readonly WalletFeatureFlag _aiTools;
+
+    /// <summary>
+    /// Specifies if the AI tools enabled as a wallet service or not.
+    /// </summary>
+    /// <example>true</example>
+    public bool AITools
+    {
+        get => _aiTools.Value;
+        set => _aiTools.Value = value;
+    }
+
+    public TenantQuota()
+    {
+        _featuresList = [];
+
+        _countUserFeature = new CountUserFeature(this) { Order = 1 };
+        _countPaidUserFeature = new CountPaidUserFeature(this);
+        _usersInRoomFeature = new UsersInRoomFeature(this) { Visible = false };
+        _countRoomFeature = new CountRoomFeature(this) { Order = 2 };
+        _maxTotalSizeFeature = new MaxTotalSizeFeature(this);
+        _maxFileSizeFeature = new MaxFileSizeFeature(this);
+        _nonProfitFeature = new TenantQuotaFeatureFlag(this, "non-profit") { Visible = false };
+        _trialFeature = new TenantQuotaFeatureFlag(this, "trial") {  Visible = false };
+        _freeFeature = new FreeFeature(this) { Visible = false };
+        _updateFeature = new TenantQuotaFeatureFlag(this, "update") { Standalone = true };
+        _auditFeature = new TenantQuotaFeatureFlag(this, "audit") { Order = 8, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _docsEditionFeature = new TenantQuotaFeatureFlag(this, "docs") { Visible = false };
+        _ldapFeature = new TenantQuotaFeatureFlag(this, "ldap") { Order = 4, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _ssoFeature = new TenantQuotaFeatureFlag(this, "sso") { Order = 5, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _brandingFeature = new TenantQuotaFeatureFlag(this, "branding") { EmployeeType = EmployeeType.DocSpaceAdmin };
+        _customizationFeature = new TenantQuotaFeatureFlag(this, "customization") { Order = 3, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _lifetimeFeature = new TenantQuotaFeatureFlag(this, "lifetime") { Standalone = true };
+        _automationApiFeature = new TenantQuotaFeatureFlag(this, "automationapi") { Order = 12 };
+        _customFeature = new TenantQuotaFeatureFlag(this, "custom") { Visible = false };
+        _restoreFeature = new TenantQuotaFeatureFlag(this, "restore") { Order = 7, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _oauthFeature = new TenantQuotaFeatureFlag(this, "oauth");
+        _contentSearchFeature = new TenantQuotaFeatureFlag(this, "contentsearch") { Visible = false };
+        _thirdPartyFeature = new TenantQuotaFeatureFlag(this, "thirdparty") { Order = 9, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _statisticFeature = new TenantQuotaFeatureFlag(this, "statistic") { Order = 10 };
+        _yearFeature = new TenantQuotaFeatureFlag(this, "year") { EmployeeType = EmployeeType.DocSpaceAdmin };
+        _countFreeBackup = new CountFreeBackupFeature(this) { Order = 6, EmployeeType = EmployeeType.DocSpaceAdmin };
+        _backup = new WalletFeatureFlag(this, "backup") { EmployeeType = EmployeeType.DocSpaceAdmin };
+        _countAIAgentFeature = new CountAIAgentFeature(this) { Order = 11 };
+        _aiTools = new WalletFeatureFlag(this, "aitools") { EmployeeType = EmployeeType.DocSpaceAdmin };
+
+        TenantQuotaFeatures = new List<TenantQuotaFeature>
+        {
+            _countUserFeature,
+            _countPaidUserFeature,
+            _usersInRoomFeature,
+            _countRoomFeature,
+            _maxTotalSizeFeature,
+            _maxFileSizeFeature,
+            _nonProfitFeature,
+            _trialFeature,
+            _freeFeature,
+            _updateFeature,
+            _auditFeature,
+            _docsEditionFeature,
+            _ldapFeature,
+            _ssoFeature,
+            _brandingFeature,
+            _customizationFeature,
+            _lifetimeFeature,
+            _automationApiFeature,
+            _customFeature,
+            _restoreFeature,
+            _oauthFeature,
+            _contentSearchFeature,
+            _thirdPartyFeature,
+            _statisticFeature,
+            _yearFeature,
+            _countFreeBackup,
+            _backup,
+            _countAIAgentFeature,
+            _aiTools
+        };
+    }
+
+    public TenantQuota(int tenant) : this()
+    {
+        TenantId = tenant;
+    }
+
+    public TenantQuota(TenantQuota quota) : this()
+    {
+        TenantId = quota.TenantId;
+        Name = quota.Name;
+        Price = quota.Price;
+        ProductId = quota.ProductId;
+        ServiceName = quota.ServiceName;
+        ServiceGroup = quota.ServiceGroup;
+        Visible = quota.Visible;
+        MaxFileSize = quota.MaxFileSize;
+        Features = quota.Features;
+        Wallet = quota.Wallet;
+        DueDate = quota.DueDate;
+    }
+
+    public override int GetHashCode()
+    {
+        return TenantId.GetHashCode();
+    }
+
+    public override bool Equals(object obj)
+    {
+        return obj is TenantQuota q && q.TenantId == TenantId;
+    }
+
+    public async Task CheckAsync(IServiceProvider serviceProvider)
+    {
+        foreach (var checker in serviceProvider.GetServices<ITenantQuotaFeatureChecker>())
+        {
+            await checker.CheckUsed(this);
+        }
+    }
+
+    public static TenantQuota operator *(TenantQuota quota, int quantity)
+    {
+        var newQuota = new TenantQuota(quota);
+
+        newQuota.Price *= quantity;
+
+        for (var i = 0; i < newQuota.TenantQuotaFeatures.Count; i++)
+        {
+            newQuota.TenantQuotaFeatures[i].Multiply(quantity);
+        }
+
+        return newQuota;
+    }
+
+    public static TenantQuota operator +(TenantQuota old, TenantQuota quota)
+    {
+        if (old == null)
+        {
+            return quota;
+        }
+
+        if (quota.Wallet && quota.DueDate.HasValue && quota.DueDate.Value < DateTime.UtcNow)
+        {
+            return old;
+        }
+
+        var newQuota = new TenantQuota(old)
+        {
+            ProductId = ""
+        };
+
+        if (quota.Wallet)
+        {
+            if (quota.DueDate.HasValue)
+            {
+                newQuota.DueDate = newQuota.DueDate.HasValue
+                    ? DateTime.Compare(newQuota.DueDate.Value, quota.DueDate.Value) < 0 ? newQuota.DueDate.Value : quota.DueDate.Value
+                    : quota.DueDate.Value;
+            }
+        }
+        else
+        {
+            newQuota.Price += quota.Price;
+            newQuota.Visible &= quota.Visible;
+        }
+
+        foreach (var f in newQuota.TenantQuotaFeatures)
+        {
+            if (f is MaxFileSizeFeature fileSize)
+            {
+                if (quota.MaxFileSize != long.MaxValue)
+                {
+                    fileSize.Value = Math.Max(fileSize.Value, quota.MaxFileSize);
+                }
+            }
+            else if (f is TenantQuotaFeatureCount count)
+            {
+                var currentValue = count.Value;
+                var newValue = quota.GetFeature<int>(f.Name).Value;
+
+                if (currentValue == count.Default && newValue != currentValue)
+                {
+                    count.Value = newValue;
+                }
+                else if (currentValue != count.Default && newValue != count.Default)
+                {
+                    try
+                    {
+                        if (newValue != int.MaxValue)
+                        {
+                            count.Value = checked(count.Value + newValue);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        count.Value = int.MaxValue;
+                    }
+                }
+            }
+            else if (f is TenantQuotaFeatureSize length)
+            {
+                var currentValue = length.Value;
+                var newValue = quota.GetFeature<long>(f.Name).Value;
+
+                if (currentValue == length.Default && newValue != currentValue)
+                {
+                    length.Value = newValue;
+                }
+                else
+                {
+                    try
+                    {
+                        if (newValue != long.MaxValue)
+                        {
+                            length.Value = checked(length.Value + newValue);
+                        }
+                    }
+                    catch (OverflowException)
+                    {
+                        length.Value = long.MaxValue;
+                    }
+                }
+            }
+            else if (f is TenantQuotaFeatureFlag flag)
+            {
+                flag.Value |= quota.GetFeature<bool>(f.Name).Value;
+            }
+        }
+
+        return newQuota;
+    }
+
+    public TenantQuotaFeature<T> GetFeature<T>(string name)
+    {
+        return TenantQuotaFeatures.OfType<TenantQuotaFeature<T>>().FirstOrDefault(f => string.Equals(f.Name.Split(':')[0], $"{name}", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public T GetFeature<T>() where T : TenantQuotaFeature
+    {
+        return TenantQuotaFeatures.OfType<T>().FirstOrDefault();
+    }
+    public string GetPaymentId()
+    {
+        return string.IsNullOrEmpty(ProductId) ? ServiceName : ProductId;
+    }
+
+    internal string GetFeature(string name)
+    {
+        return _featuresList.Find(f => string.Equals(f.Split(':')[0], $"{name}", StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal void ReplaceFeature<T>(string name, T value, T defaultValue)
+    {
+        var featureValue = GetFeature(name);
+        _featuresList.Remove(featureValue);
+
+        if (!EqualityComparer<T>.Default.Equals(value, default) && !EqualityComparer<T>.Default.Equals(value, defaultValue))
+        {
+            _featuresList.Add(value is bool ? $"{name}" : $"{name}:{value}");
+        }
+    }
+}
+
+[Scope]
+[Mapper(RequiredMappingStrategy = RequiredMappingStrategy.None, PropertyNameMappingStrategy = PropertyNameMappingStrategy.CaseInsensitive)]
+public partial class TenantQuotaMapper(IServiceProvider provider)
+{
+    private partial TenantQuota Map(DbQuota source);
+    public partial List<TenantQuota> Map(List<DbQuota> source);
+    public partial DbQuota Map(TenantQuota source);
+
+    [UserMapping(Default = true)]
+    public async Task<TenantQuota> MapDbQuotaToTenantQuota(DbQuota quota)
+    {
+        var dto = Map(quota);
+        (dto.Price, dto.PriceCurrencySymbol, dto.PriceISOCurrencySymbol) = await Resolve(quota);
+        return dto;
+    }
+
+    private async Task<(decimal, string, string)> Resolve(DbQuota source)
+    {
+        var tenantManager = provider.GetService<TenantManager>();
+        var regionHelper = provider.GetService<RegionHelper>();
+
+        var productPaymentId = source.GetPaymentId();
+        var priceInfo = await tenantManager.GetProductPriceInfoAsync(productPaymentId, source.Wallet);
+
+        if (priceInfo != null)
+        {
+            var currentRegion = await regionHelper.GetCurrentRegionInfoAsync(new Dictionary<string, Dictionary<string, decimal>> { { productPaymentId, priceInfo } });
+
+            if (priceInfo.TryGetValue(currentRegion.ISOCurrencySymbol, out var resolve))
+            {
+                return (resolve, currentRegion.CurrencySymbol, currentRegion.ISOCurrencySymbol);
+            }
+        }
+
+        var defaultRegion = regionHelper.GetDefaultRegionInfo();
+        return (source.Price, defaultRegion.CurrencySymbol, defaultRegion.ISOCurrencySymbol);
+    }
+}

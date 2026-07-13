@@ -1,0 +1,227 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Core.Common;
+
+[Scope]
+public class BaseCommonLinkUtility
+{
+    private const string LocalHost = "localhost";
+
+    private UriBuilder _serverRoot;
+    private string _vpath;
+
+    protected readonly IHttpContextAccessor _httpContextAccessor;
+    private bool serverUriForce;
+    public string ServerUri
+    {
+        set
+        {
+            var uri = new Uri(value.Replace('*', 'x').Replace('+', 'x'));
+            _serverRoot = new UriBuilder(uri.Scheme, uri.Host != "x" ? uri.Host : LocalHost, uri.Port);
+            _vpath = "/" + uri.AbsolutePath.Trim('/');
+            serverUriForce = true;
+        }
+    }
+
+    public BaseCommonLinkUtility(
+        IHttpContextAccessor httpContextAccessor,
+        CoreBaseSettings coreBaseSettings,
+        CoreSettings coreSettings,
+        TenantManager tenantManager,
+        ILoggerFactory loggerFactory)
+    {
+
+        try
+        {
+            _httpContextAccessor = httpContextAccessor;
+
+            if (_httpContextAccessor?.HttpContext?.Request != null)
+            {
+                var u = _httpContextAccessor?.HttpContext.Request.Url();
+
+                ArgumentNullException.ThrowIfNull(u);
+
+                _serverRoot = new UriBuilder(u.Scheme, LocalHost, u.Port);
+            }
+            else
+            {
+                var serverRoot = coreBaseSettings.ServerRoot;
+
+                if (string.IsNullOrEmpty(serverRoot))
+                {
+                    _serverRoot = new UriBuilder(Uri.UriSchemeHttp, LocalHost);
+                }
+                else
+                {
+                    ServerUri = serverRoot;
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            loggerFactory.CreateLogger("ASC.Web").ErrorWithException(error);
+        }
+
+        _coreBaseSettings = coreBaseSettings;
+        _coreSettings = coreSettings;
+        _tenantManager = tenantManager;
+    }
+
+    public string VirtualRoot => ToAbsolute("~");
+
+    protected readonly CoreBaseSettings _coreBaseSettings;
+    private readonly CoreSettings _coreSettings;
+    protected readonly TenantManager _tenantManager;
+
+    public string ServerRootPath
+    {
+        get
+        {
+            UriBuilder result;
+            // first, take from current request
+            if (_httpContextAccessor?.HttpContext?.Request != null && !serverUriForce)
+            {
+                var u = _httpContextAccessor.HttpContext.Request.Url();
+
+                ArgumentNullException.ThrowIfNull(u);
+
+                result = new UriBuilder(u.Scheme, u.Host, u.Port);
+
+                if (_coreBaseSettings.Standalone && !result.Uri.IsLoopback)
+                {
+                    // save for stanalone
+                    _serverRoot.Host = result.Host;
+                }
+            }
+            else
+            {
+                result = new UriBuilder(_serverRoot.Uri);
+            }
+
+            if (result.Uri.IsLoopback)
+            {
+                // take values from db if localhost or no http context thread
+                var tenant = _tenantManager.GetCurrentTenant();
+                result.Host = tenant.GetTenantDomain(_coreSettings);
+
+                if (!string.IsNullOrEmpty(tenant.MappedDomain))
+                {
+                    var mapped = tenant.MappedDomain.ToLowerInvariant();
+                    if (!mapped.Contains(Uri.SchemeDelimiter))
+                    {
+                        mapped = result.Scheme + Uri.SchemeDelimiter + mapped;
+                    }
+                    result = new UriBuilder(mapped);
+                }
+            }
+
+            return result.Uri.ToString().TrimEnd('/');
+        }
+    }
+
+    public string GetFullAbsolutePath(string virtualPath)
+    {
+        if (string.IsNullOrEmpty(virtualPath))
+        {
+            return ServerRootPath;
+        }
+
+        if (virtualPath.StartsWith("http://", StringComparison.InvariantCultureIgnoreCase) ||
+            virtualPath.StartsWith("mailto:", StringComparison.InvariantCultureIgnoreCase) ||
+            virtualPath.StartsWith("javascript:", StringComparison.InvariantCultureIgnoreCase) ||
+            virtualPath.StartsWith("https://", StringComparison.InvariantCultureIgnoreCase))
+        {
+            return virtualPath;
+        }
+
+        if (virtualPath.StartsWith('/'))
+        {
+            return ServerRootPath + virtualPath;
+        }
+
+        return ServerRootPath + VirtualRoot.TrimEnd('/') + "/" + virtualPath.TrimStart('~', '/');
+    }
+
+    public string ToAbsolute(string virtualPath)
+    {
+        if (_vpath == null)
+        {
+            return VirtualPathUtility.ToAbsolute(virtualPath);
+        }
+
+        if (string.IsNullOrEmpty(virtualPath) || virtualPath.StartsWith('/'))
+        {
+            return virtualPath;
+        }
+
+        return (_vpath != "/" ? _vpath : string.Empty) + "/" + virtualPath.TrimStart('~', '/');
+    }
+
+    public static string GetRegionalUrl(string url, string lang)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            return url;
+        }
+
+        //-replace language
+        var regex = new Regex("{.*?}");
+        var matches = regex.Matches(url);
+
+        if (string.IsNullOrEmpty(lang))
+        {
+            url = matches.Aggregate(url, (current, match) => current.Replace(match.Value, string.Empty));
+        }
+        else
+        {
+            foreach (var match in matches.Select(r => r.Value))
+            {
+                var values = match.TrimStart('{').TrimEnd('}').Split('|');
+                url = url.Replace(match, values.Contains(lang) ? lang : string.Empty);
+            }
+        }
+
+        //remove redundant slashes
+        url = Regex.Replace(url, @"(?<!:)//+", "/");
+
+        return url.TrimEnd('/');
+    }
+
+    public void Initialize(string serverUri, bool localhost = true)
+    {
+        var uri = new Uri(serverUri.Replace('*', 'x').Replace('+', 'x'));
+        _serverRoot = new UriBuilder(uri.Scheme, localhost ? LocalHost : uri.Host, uri.Port);
+        _vpath = "/" + uri.AbsolutePath.Trim('/');
+    }
+}

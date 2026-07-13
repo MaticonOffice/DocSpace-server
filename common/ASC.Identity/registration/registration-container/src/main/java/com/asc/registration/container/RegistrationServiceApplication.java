@@ -1,0 +1,105 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.registration.container;
+
+import io.swagger.v3.oas.annotations.OpenAPIDefinition;
+import io.swagger.v3.oas.annotations.enums.SecuritySchemeIn;
+import io.swagger.v3.oas.annotations.enums.SecuritySchemeType;
+import io.swagger.v3.oas.annotations.info.Contact;
+import io.swagger.v3.oas.annotations.info.Info;
+import io.swagger.v3.oas.annotations.info.License;
+import io.swagger.v3.oas.annotations.security.SecurityScheme;
+import io.swagger.v3.oas.annotations.security.SecuritySchemes;
+import io.swagger.v3.oas.annotations.servers.Server;
+import net.devh.boot.grpc.server.autoconfigure.GrpcServerSecurityAutoConfiguration;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.persistence.autoconfigure.EntityScan;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+/**
+ * Entry point for the ASC Identity Registration Service application.
+ *
+ * <p>This application provides APIs for managing registered clients in the ASC Identity ecosystem.
+ * It includes features like caching, transaction management, and OpenAPI documentation.
+ */
+@EnableCaching
+@EnableTransactionManagement
+@EntityScan(basePackages = {"com.asc.registration.data", "com.asc.common.data"})
+@EnableJpaRepositories(basePackages = {"com.asc.registration.data", "com.asc.common.data"})
+@SpringBootApplication(
+    scanBasePackages = {"com.asc.registration", "com.asc.common"},
+    exclude = {GrpcServerSecurityAutoConfiguration.class})
+@OpenAPIDefinition(
+    info =
+        @Info(
+            title = "ASC.Identity.Registration",
+            version = "1.1.1",
+            description = "API for managing oauth2 clients",
+            termsOfService = "",
+            contact =
+                @Contact(
+                    name = "MATICONOFFICE Support",
+                    email = "support@maticonoffice.ru",
+                    url = "https://maticonoffice.ru"),
+            license =
+                @License(
+                    name = "Apache 2.0",
+                    url = "https://www.apache.org/licenses/LICENSE-2.0.html")),
+    servers = {
+      @Server(
+          url = "http://localhost:8080",
+          description = "Local ASC.Identity.Registration API Server")
+    })
+@SecuritySchemes({
+  @SecurityScheme(
+      name = "x-signature",
+      paramName = "x-signature",
+      description = "ASC JWT Signature",
+      type = SecuritySchemeType.APIKEY,
+      in = SecuritySchemeIn.COOKIE)
+})
+public class RegistrationServiceApplication {
+
+  /**
+   * The main method to start the Registration Service application.
+   *
+   * @param args command-line arguments passed to the application.
+   */
+  public static void main(String[] args) {
+    SpringApplication.run(RegistrationServiceApplication.class, args);
+  }
+}

@@ -1,0 +1,368 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.common.utilities;
+
+import jakarta.servlet.http.HttpServletRequest;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.Optional;
+import java.util.regex.Pattern;
+import org.springframework.http.HttpMethod;
+import org.springframework.stereotype.Component;
+
+/** Utility class for handling HTTP-related operations. */
+@Component
+public class HttpUtils {
+  private static final String IP_PATTERN =
+      "https?://([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3})";
+  private static final String DOMAIN_PATTERN = "https?://([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})";
+  private static final String[] IP_HEADERS = {
+    "X-Remote-Ip-Address",
+    "X-Real-IP",
+    "X-Forwarded-Host",
+    "X-Forwarded-For",
+    "Proxy-Client-IP",
+    "WL-Proxy-Client-IP",
+    "HTTP_X_FORWARDED_FOR",
+    "HTTP_X_FORWARDED",
+    "HTTP_X_CLUSTER_CLIENT_IP",
+    "HTTP_CLIENT_IP",
+    "HTTP_FORWARDED_FOR",
+    "HTTP_FORWARDED",
+    "HTTP_VIA",
+    "REMOTE_ADDR"
+  };
+  private static final String[] HOST_HEADERS = {
+    "X-Forwarded-Host", "HTTP_X_FORWARDED", "HTTP_FORWARDED"
+  };
+
+  private HttpUtils() {
+    // Private constructor to prevent instantiation
+  }
+
+  /**
+   * Validates whether the given string is a correctly formatted IPv4 address.
+   *
+   * <p>This method checks if the provided string adheres to the standard IPv4 format. It uses a
+   * regular expression to validate the format, ensuring each octet is within the valid range of
+   * 0-255.
+   *
+   * @param ip The string to be validated as an IPv4 address.
+   * @return true if the input string is a valid IPv4 address, false otherwise.
+   */
+  private boolean isValidIPv4Format(String ip) {
+    if (ip == null || ip.isBlank()) return false;
+    var ipv4Pattern =
+        "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$";
+    return ip.matches(ipv4Pattern);
+  }
+
+  /**
+   * Determines if the given IP address is within a private or special-use range.
+   *
+   * <p>This method checks if the provided IP address falls within any of the private IP ranges as
+   * defined by RFC 1918, loopback, link-local, multicast, or other special-use addresses. It
+   * manually checks each octet of the IP address to determine if it is private.
+   *
+   * @param ip The IP address to check.
+   * @return true if the IP address is within a private or special-use range, false otherwise.
+   */
+  private boolean isPrivateIP(String ip) {
+    var parts = ip.split("\\.");
+    if (parts.length != 4) return true;
+
+    try {
+      var first = Integer.parseInt(parts[0]);
+      var second = Integer.parseInt(parts[1]);
+      var third = Integer.parseInt(parts[2]);
+      var fourth = Integer.parseInt(parts[3]);
+
+      // RFC 1918 Private ranges
+      if (first == 10) return true; // 10.0.0.0/8
+      if (first == 172 && second >= 16 && second <= 31) return true; // 172.16.0.0/12
+      if (first == 192 && second == 168) return true; // 192.168.0.0/16
+
+      // Loopback (127.0.0.0/8)
+      if (first == 127) return true;
+
+      // Link-local (169.254.0.0/16)
+      if (first == 169 && second == 254) return true;
+
+      // Multicast (224.0.0.0/4)
+      if (first >= 224 && first <= 239) return true;
+
+      // Reserved ranges
+      if (first == 0) return true; // 0.0.0.0/8 - "This network"
+      if (first == 240) return true; // 240.0.0.0/4 - Reserved for future use
+      if (first == 255 && second == 255 && third == 255 && fourth == 255) return true; // Broadcast
+
+      return false;
+    } catch (NumberFormatException e) {
+      return true;
+    }
+  }
+
+  /**
+   * Validates if the given IP address is a valid public IPv4 address.
+   *
+   * <p>This method performs a comprehensive check to ensure the IP address is valid and public. It
+   * checks the format of the IP address, and ensures it is not a loopback, link-local, site-local,
+   * multicast, or private IP address.
+   *
+   * @param ip The IP address to validate.
+   * @return true if the IP address is valid and public, false otherwise.
+   */
+  public boolean isValidPublicIp(String ip) {
+    if (ip == null || ip.isBlank()) return false;
+
+    try {
+      var inetAddress = InetAddress.getByName(ip);
+      if (!isValidIPv4Format(ip)) return false;
+
+      if (inetAddress.isLoopbackAddress()) return false;
+
+      if (inetAddress.isLinkLocalAddress()) return false;
+
+      if (inetAddress.isSiteLocalAddress()) return false;
+
+      if (inetAddress.isMulticastAddress()) return false;
+
+      if (isPrivateIP(ip)) return false;
+
+      return true;
+    } catch (UnknownHostException e) {
+      return false;
+    }
+  }
+
+  /**
+   * Retrieves the HTTP method from the request with a fallback to "GET" for invalid methods.
+   *
+   * <p>This method attempts to determine the HTTP method used in the request. If the method is not
+   * specified or is invalid, it defaults to "GET".
+   *
+   * @param request The HttpServletRequest object from which to extract the HTTP method.
+   * @return The HTTP method as a string, defaults to "GET" if the method is invalid or not
+   *     specified.
+   */
+  public String getHttpMethod(HttpServletRequest request) {
+    var method = request.getMethod();
+    if (method == null || method.isBlank()) return "GET";
+
+    try {
+      return HttpMethod.valueOf(method).name();
+    } catch (IllegalArgumentException e) {
+      return "GET";
+    }
+  }
+
+  /**
+   * Retrieves the first IP address from the request headers.
+   *
+   * @param request HttpServletRequest object
+   * @return The first IP address found in the request headers, or the remote address if none found
+   */
+  public String getFirstRequestIP(HttpServletRequest request) {
+    for (var header : IP_HEADERS) {
+      var value = request.getHeader(header);
+      if (value != null && !value.isEmpty()) return value.split("\\s*,\\s*")[0];
+    }
+
+    return request.getRemoteAddr();
+  }
+
+  /**
+   * Retrieves the first host IP address from the request headers.
+   *
+   * @param request HttpServletRequest object
+   * @return The first host IP address found in the request headers, or the remote address if none
+   *     found
+   */
+  public String getFirstForwardedHost(HttpServletRequest request) {
+    for (var header : HOST_HEADERS) {
+      var value = request.getHeader(header);
+      if (value != null && !value.isEmpty()) return value.split("\\s*,\\s*")[0];
+    }
+
+    return request.getRemoteAddr();
+  }
+
+  /**
+   * Determines the client's operating system from the User-Agent header.
+   *
+   * @param request HttpServletRequest object
+   * @return Client's operating system
+   */
+  public String getClientOS(HttpServletRequest request) {
+    var userAgent = request.getHeader("User-Agent");
+    if (userAgent == null) return "Unknown";
+
+    var osFamily = "Unknown";
+    var osMajor = "";
+    var deviceBrand = "";
+    var deviceModel = "";
+
+    if (userAgent.toLowerCase().contains("windows")) {
+      osFamily = "Windows";
+      osMajor = extractMajorVersion(userAgent, "Windows NT");
+    } else if (userAgent.toLowerCase().contains("mac os x")) {
+      osFamily = "Mac OS X";
+      osMajor = extractMajorVersion(userAgent, "Mac OS X");
+      deviceBrand = "Apple";
+      deviceModel = "Mac";
+    } else if (userAgent.toLowerCase().contains("android")) {
+      osFamily = "Android";
+      osMajor = extractMajorVersion(userAgent, "Android");
+    } else if (userAgent.toLowerCase().contains("iphone")) {
+      osFamily = "iPhone OS";
+      osMajor = extractMajorVersion(userAgent, "iPhone OS");
+    } else if (userAgent.toLowerCase().contains("x11")) {
+      osFamily = "Unix";
+    }
+
+    return String.format("%s %s %s %s", osFamily, osMajor, deviceBrand, deviceModel).trim();
+  }
+
+  /**
+   * Determines the client's browser from the User-Agent header.
+   *
+   * @param request HttpServletRequest object
+   * @return Client's browser
+   */
+  public String getClientBrowser(HttpServletRequest request) {
+    var browserDetails = request.getHeader("User-Agent");
+    var user = browserDetails.toLowerCase();
+    var browser = "";
+    if (user.contains("msie")) {
+      var substring = browserDetails.substring(browserDetails.indexOf("MSIE")).split(";")[0];
+      browser = substring.split(" ")[0].replace("MSIE", "IE") + " " + substring.split(" ")[1];
+    } else if (user.contains("safari") && user.contains("version")) {
+      browser =
+          (browserDetails.substring(browserDetails.indexOf("Safari")).split(" ")[0]).split("/")[0]
+              + " "
+              + (browserDetails.substring(browserDetails.indexOf("Version")).split(" ")[0])
+                  .split("/")[1];
+    } else if (user.contains("opr") || user.contains("opera")) {
+      if (user.contains("opera"))
+        browser =
+            (browserDetails.substring(browserDetails.indexOf("Opera")).split(" ")[0]).split("/")[0]
+                + "-"
+                + (browserDetails.substring(browserDetails.indexOf("Version")).split(" ")[0])
+                    .split("/")[1];
+      else if (user.contains("opr"))
+        browser =
+            ((browserDetails.substring(browserDetails.indexOf("OPR")).split(" ")[0])
+                    .replace("/", " "))
+                .replace("OPR", "Opera");
+    } else if (user.contains("chrome")) {
+      browser =
+          (browserDetails.substring(browserDetails.indexOf("Chrome")).split(" ")[0])
+              .replace("/", "-")
+              .replaceAll("\\.[0-9]+", "")
+              .replaceAll("-", " ");
+    } else if ((user.contains("mozilla/7.0"))
+        || (user.contains("netscape6"))
+        || (user.contains("mozilla/4.7"))
+        || (user.contains("mozilla/4.78"))
+        || (user.contains("mozilla/4.08"))
+        || (user.contains("mozilla/3"))) {
+      browser = "Netscape";
+    } else if (user.contains("firefox")) {
+      browser =
+          (browserDetails.substring(browserDetails.indexOf("Firefox")).split(" ")[0])
+              .replace("/", " ");
+    } else if (user.contains("rv")) {
+      browser = "IE";
+    } else {
+      browser = "Unknown";
+    }
+
+    return browser;
+  }
+
+  /**
+   * Constructs the full URL of the current request.
+   *
+   * @param request HttpServletRequest object
+   * @return Full URL of the request
+   */
+  public String getFullURL(HttpServletRequest request) {
+    var requestURL = request.getRequestURL();
+    var queryString = request.getQueryString();
+    return queryString == null
+        ? requestURL.toString()
+        : requestURL.append('?').append(queryString).toString();
+  }
+
+  /**
+   * Extracts the host from the given URL.
+   *
+   * @param url The URL to extract the host from
+   * @return The extracted host if found, otherwise the original URL
+   */
+  public String extractHostFromUrl(String url) {
+    return extractPattern(url, IP_PATTERN)
+        .or(() -> extractPattern(url, DOMAIN_PATTERN))
+        .orElse(url);
+  }
+
+  /**
+   * Extracts a pattern from the given input string.
+   *
+   * @param input The input string
+   * @param pattern The pattern to extract
+   * @return An Optional containing the extracted pattern if found, otherwise an empty Optional
+   */
+  private Optional<String> extractPattern(String input, String pattern) {
+    var compiledPattern = Pattern.compile(pattern);
+    var matcher = compiledPattern.matcher(input);
+    if (matcher.find()) return Optional.of(matcher.group(1));
+    return Optional.empty();
+  }
+
+  /**
+   * Extracts OS major version
+   *
+   * @param userAgent
+   * @param identifier
+   * @return A string with a major version or an empty string
+   */
+  private String extractMajorVersion(String userAgent, String identifier) {
+    var versionPattern = identifier + " ([\\d.]+)";
+    var pattern = Pattern.compile(versionPattern);
+    var matcher = pattern.matcher(userAgent);
+    if (matcher.find()) return matcher.group(1).split("\\.")[0];
+    return "";
+  }
+}

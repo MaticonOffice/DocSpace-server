@@ -1,0 +1,108 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Notify.Engine;
+
+[Singleton]
+public class DispatchEngine
+{
+    private readonly ILogger _logger;
+    private readonly ILogger _messagesLogger;
+    private readonly Context _context;
+    private readonly bool _logOnly;
+
+    public DispatchEngine(Context context, IConfiguration configuration, ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger("ASC.Notify");
+        _messagesLogger = loggerFactory.CreateLogger("ASC.Notify.Messages");
+        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _logOnly = "log".Equals(configuration["core:notify:postman"], StringComparison.InvariantCultureIgnoreCase);
+        _logger.LogOnly(_logOnly);
+    }
+
+    public async Task<SendResponse> Dispatch(INoticeMessage message, string senderName, IServiceScope serviceScope)
+    {
+        var response = new SendResponse(message, senderName, SendResult.OK);
+        if (!_logOnly)
+        {
+            var sender = _context.GetSender(senderName);
+            if (sender != null)
+            {
+                response = await sender.DirectSend(message, serviceScope);
+            }
+            else
+            {
+                response = new SendResponse(message, senderName, SendResult.Impossible);
+            }
+
+            LogResponce(message, response, sender != null ? sender.SenderName : string.Empty);
+        }
+
+        LogMessage(message, senderName);
+
+        return response;
+    }
+
+    private void LogResponce(INoticeMessage message, SendResponse response, string senderName)
+    {
+        if (response.Result == SendResult.Inprogress)
+        {
+            _logger.LogDebugResponceWithException(message.Subject, message.Recipient.ToString(), senderName, response.Result, response.Exception);
+        }
+        else if (response.Result == SendResult.Impossible)
+        {
+            _logger.LogErrorResponceWithException(message.Subject, message.Recipient.ToString(), senderName, response.Result, response.Exception);
+        }
+        else
+        {
+            _logger.LogDebugResponce(message.Subject, message.Recipient.ToString(), senderName, response.Result);
+        }
+    }
+
+    private void LogMessage(INoticeMessage message, string senderName)
+    {
+        try
+        {
+            _messagesLogger.LogMessage(
+                message.Action.ToString(),
+                message.Recipient.ToString(),
+                senderName,
+                0 < message.Recipient.Addresses.Length ? message.Recipient.Addresses[0] : string.Empty,
+                DateTime.Now,
+                message.Subject,
+                (message.Body ?? string.Empty).Replace(Environment.NewLine, Environment.NewLine + "   "),
+                new string('-', 80));
+        }
+        catch { }
+    }
+}

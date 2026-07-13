@@ -1,0 +1,158 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Core.Utility.Settings;
+
+[Singleton]
+public class CustomColorThemesSettingsHelper(IConfiguration configuration)
+{
+    public int Limit { get; set; } = configuration.GetSection("core:themelimit").Get<int>();
+}
+
+public class CustomColorThemesSettings : ISettings<CustomColorThemesSettings>
+{
+    public List<CustomColorThemesSettingsItem> Themes { get; set; }
+    public int Selected { get; set; }
+
+    public CustomColorThemesSettings GetDefault()
+    {
+        Themes = CustomColorThemesSettingsItem.Default;
+
+        return new CustomColorThemesSettings
+        {
+            Themes = Themes,
+            Selected = Themes.Min(r => r.Id)
+        };
+    }
+
+    public DateTime LastModified { get; set; }
+
+    public static Guid ID => new("{FE096AE9-3044-4B92-A94C-46E323F82681}");
+}
+
+/// <summary>
+/// The custom color theme settings.
+/// </summary>
+public class CustomColorThemesSettingsItem
+{
+    /// <summary>
+    /// The custom color theme ID.
+    /// </summary>
+    /// <example>1</example>
+    public int Id { get; set; }
+
+    /// <summary>
+    /// The custom color theme name.
+    /// </summary>
+    /// <example>blue</example>
+    public string Name { get; set; }
+
+    /// <summary>
+    /// The custom color theme main colors.
+    /// </summary>
+    public CustomColorThemesSettingsColorItem Main { get; set; }
+
+    /// <summary>
+    /// The custom color theme text colors.
+    /// </summary>
+    public CustomColorThemesSettingsColorItem Text { get; set; }
+
+    public static List<CustomColorThemesSettingsItem> Default =>
+    [
+        new()
+        {
+            Id = 1,
+            Name = "blue",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#4781D1", Buttons = "#5299E0" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        },
+
+        new()
+        {
+            Id = 2,
+            Name = "orange",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#F97A0B", Buttons = "#FF9933" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        },
+
+        new()
+        {
+            Id = 3,
+            Name = "green",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#2DB482", Buttons = "#22C386" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        },
+
+        new()
+        {
+            Id = 4,
+            Name = "red",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#F2675A", Buttons = "#F27564" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        },
+
+        new()
+        {
+            Id = 5,
+            Name = "purple",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#6D4EC2", Buttons = "#8570BD" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        },
+
+        new()
+        {
+            Id = 6,
+            Name = "light-blue",
+            Main = new CustomColorThemesSettingsColorItem { Accent = "#11A4D4", Buttons = "#13B7EC" },
+            Text = new CustomColorThemesSettingsColorItem { Accent = "#FFFFFF", Buttons = "#FFFFFF" }
+        }
+    ];
+}
+
+/// <summary>
+/// The custom color theme color parameters.
+/// </summary>
+public class CustomColorThemesSettingsColorItem
+{
+    /// <summary>
+    /// The accent color.
+    /// </summary>
+    /// <example>#4781D1</example>
+    public string Accent { get; init; }
+
+    /// <summary>
+    /// The button color.
+    /// </summary>
+    /// <example>#5299E0</example>
+    public string Buttons { get; init; }
+}

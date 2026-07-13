@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- See ASC.Migrations.MySql.SaaS.csproj for rationale. -->
+    <Nullable>disable</Nullable>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <DefineConstants>$(DefineConstants)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\common\ASC.ActiveDirectory\ASC.ActiveDirectory.csproj" />
+    <ProjectReference Include="..\..\..\common\ASC.Data.Backup.Core\ASC.Data.Backup.Core.csproj" />
+    <ProjectReference Include="..\..\..\common\Tools\ASC.Migrations.Core\ASC.Migrations.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="MigrationContext\" />
+  </ItemGroup>
+
+</Project>

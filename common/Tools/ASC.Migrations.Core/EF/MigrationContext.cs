@@ -1,0 +1,244 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.AI.Core.Database.Models;
+
+namespace ASC.Migrations.Core;
+
+public class MigrationContext : DbContext
+{
+    public DbSet<AccountLinks> AccountLinks { get; set; }
+
+    public DbSet<DbTariff> Tariffs { get; set; }
+    public DbSet<DbTariffRow> TariffRows { get; set; }
+    public DbSet<DbQuota> Quotas { get; set; }
+    public DbSet<DbQuotaRow> QuotaRows { get; set; }
+
+    public DbSet<MobileAppInstall> MobileAppInstall { get; set; }
+    public DbSet<DbIPLookup> DbIPLookup { get; set; }
+
+    public DbSet<Regions> Regions { get; set; }
+
+    public DbSet<FireBaseUser> FireBaseUsers { get; set; }
+
+    public DbSet<NotifyInfo> NotifyInfo { get; set; }
+    public DbSet<NotifyQueue> NotifyQueue { get; set; }
+
+    public DbSet<TelegramUser> TelegramUsers { get; set; }
+
+    public DbSet<DbTenant> Tenants { get; set; }
+    public DbSet<DbTenantVersion> TenantVersion { get; set; }
+    public DbSet<DbTenantForbiden> TenantForbiden { get; set; }
+    public DbSet<TenantIpRestrictions> TenantIpRestrictions { get; set; }
+    public DbSet<DbCoreSettings> CoreSettings { get; set; }
+
+    public DbSet<User> Users { get; set; }
+    public DbSet<UserSecurity> UserSecurity { get; set; }
+    public DbSet<UserPhoto> Photos { get; set; }
+    public DbSet<Acl> Acl { get; set; }
+    public DbSet<DbGroup> Groups { get; set; }
+    public DbSet<UserGroup> UserGroups { get; set; }
+    public DbSet<Subscription> Subscriptions { get; set; }
+    public DbSet<DbSubscriptionMethod> SubscriptionMethods { get; set; }
+    public DbSet<UserDav> UsersDav { get; set; }
+
+    public DbSet<DbWebstudioSettings> WebstudioSettings { get; set; }
+    public DbSet<DbWebstudioIndex> WebstudioIndex { get; set; }
+
+    public DbSet<InstanceRegistration> InstanceRegistrations { get; set; }
+
+    public DbSet<DbAuditEvent> AuditEvents { get; set; }
+    public DbSet<DbLoginEvent> LoginEvents { get; set; }
+
+    public DbSet<BackupRecord> Backups { get; set; }
+    public DbSet<BackupSchedule> Schedules { get; set; }
+
+    public DbSet<IntegrationEventLogEntry> IntegrationEventLogs { get; set; }
+
+    public DbSet<DbWebhooksConfig> WebhooksConfigs { get; set; }
+    public DbSet<DbWebhooksLog> WebhooksLogs { get; set; }
+    public DbSet<DbWebhook> Webhooks { get; set; }
+    public DbSet<ApiKey> ApiKeys { get; set; }
+
+    public DbSet<DbFile> Files { get; set; }
+    public DbSet<DbFolder> Folders { get; set; }
+    public DbSet<DbFolderTree> Tree { get; set; }
+    public DbSet<DbFilesBunchObjects> BunchObjects { get; set; }
+    public DbSet<DbFilesSecurity> Security { get; set; }
+    public DbSet<DbFilesThirdpartyIdMapping> ThirdpartyIdMapping { get; set; }
+    public DbSet<DbFilesFormRoleMapping> FilesFormRoleMapping { get; set; }
+    public DbSet<DbFilesThirdpartyAccount> ThirdpartyAccount { get; set; }
+    public DbSet<DbFilesTagLink> TagLink { get; set; }
+    public DbSet<DbFilesTag> Tag { get; set; }
+    public DbSet<DbFilesThirdpartyApp> ThirdpartyApp { get; set; }
+    public DbSet<DbFilesLink> FilesLink { get; set; }
+    public DbSet<DbFilesProperties> FilesProperties { get; set; }
+    public DbSet<DbFileOrder> FileOrder { get; set; }
+    public DbSet<DbRoomSettings> RoomSettings { get; set; }
+    public DbSet<ShortLink> ShortLink { get; set; }
+    public DbSet<DbFilesAuditReference> FilesAuditReferences { get; set; }
+    public DbSet<DbFilesGroup> FilesGroup { get; set; }
+    public DbSet<DbFilesRoomGroup> FilesRoomGroup { get; set; }
+
+
+    public DbSet<IdentityAuthorization> IdentityAuthorizations { get; set; }
+
+    public DbSet<IdentityCert> IdentityCerts { get; set; }
+
+    public DbSet<IdentityClient> IdentityClients { get; set; }
+
+    public DbSet<IdentityClientAllowedOrigin> IdentityClientAllowedOrigins { get; set; }
+
+    public DbSet<IdentityClientAuthenticationMethod> IdentityClientAuthenticationMethods { get; set; }
+
+    public DbSet<IdentityClientRedirectUri> IdentityClientRedirectUris { get; set; }
+
+    public DbSet<IdentityClientScope> IdentityClientScopes { get; set; }
+
+    public DbSet<IdentityConsent> IdentityConsents { get; set; }
+
+    public DbSet<IdentityConsentScope> IdentityConsentScopes { get; set; }
+
+    public DbSet<IdentityScope> IdentityScopes { get; set; }
+
+    public DbSet<IdentityShedlock> IdentityShedlocks { get; set; }
+    public DbSet<DbUserRelation> UserRelations { get; set; }
+
+    public DbSet<DbChat> Chats { get; set; }
+    public DbSet<DbChatMessage> ChatMessages { get; set; }
+    public DbSet<DbChatMessageAttachment> ChatMessageAttachments { get; set; }
+    public DbSet<DbAiProvider> AiProviders { get; set; }
+    public DbSet<DbDefaultAiProvider> DefaultAiProviders { get; set; }
+    public DbSet<DbAiModelSettings> AiModelSettings { get; set; }
+
+    public DbSet<DbMcpServer> McpServers { get; set; }
+    public DbSet<DbMcpServerState> McpServerStates { get; set; }
+    public DbSet<DbMcpServerSettings> McpServerSettings { get; set; }
+    public DbSet<DbRoomMcpServer> McpRoomServers { get; set; }
+
+    public DbSet<DbFileVectorization> FileVectorization { get; set; }
+    public DbSet<DbUserChatSettings> UserChatSettings { get; set; }
+
+    public DbSet<InvitationLink> InvitationLinks { get; set; }
+
+    public MigrationContext(DbContextOptions<MigrationContext> options) : base(options) { }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        ModelBuilderWrapper
+            .From(modelBuilder, Database)
+            .AddAccountLinks()
+            .AddDbQuotaRow()
+            .AddDbQuota()
+            .AddDbTariff()
+            .AddDbTariffRow()
+            .AddMobileAppInstall()
+            .AddDbIPLookup()
+            .AddRegions()
+            .AddFireBaseUsers()
+            .AddNotifyInfo()
+            .AddNotifyQueue()
+            .AddTelegramUsers()
+            .AddDbTenant()
+            .AddCoreSettings()
+            .AddDbTenantForbiden()
+            .AddTenantIpRestrictions()
+            .AddDbTenantVersion()
+            .AddSubscriptionMethod()
+            .AddUser()
+            .AddAcl()
+            .AddUserSecurity()
+            .AddUserPhoto()
+            .AddDbGroup()
+            .AddUserGroup()
+            .AddSubscription()
+            .AddUserDav()
+            .AddWebstudioSettings()
+            .AddDbWebstudioIndex()
+            .AddDbFiles()
+            .AddDbFolder()
+            .AddDbFolderTree()
+            .AddDbFilesThirdpartyAccount()
+            .AddDbFilesBunchObjects()
+            .AddDbFilesSecurity()
+            .AddDbFilesThirdpartyIdMapping()
+            .AddDbFilesFormRoleMapping()
+            .AddDbFilesTagLink()
+            .AddDbFilesTag()
+            .AddDbFilesGroup()
+            .AddDbFilesRoomGroup()
+            .AddDbDbFilesThirdpartyApp()
+            .AddDbFilesLink()
+            .AddDbFilesProperties()
+            .AddInstanceRegistration()
+            .AddAuditEvent()
+            .AddLoginEvents()
+            .AddBackupSchedule()
+            .AddBackupRecord()
+            .AddIntegrationEventLog()
+            .AddDbWebhooks()
+            .AddWebhooksConfig()
+            .AddWebhooksLog()
+            .AddDbApiKeys()
+            .AddShortLinks()
+            .AddDbFileOrder()
+            .AddDbRoomSettings()
+            .AddFilesAuditReference()
+            .AddIdentity()
+            .AddIdentityCert()
+            .AddIIdentityClient()
+            .AddIdentityClientAllowedOrigin()
+            .AddIdentityClientAuthenticationMethod()
+            .AddIdentityClientRedirectUri()
+            .AddIdentityClientScope()
+            .AddIdentityConsent()
+            .AddIdentityConsentScope()
+            .AddIdentityScope()
+            .AddIdentityShedlock()
+            .AddUserRelation()
+            .AddUserRelation()
+            .AddDbChats()
+            .AddDbChatsMessages()
+            .AddDbAiProviders()
+            .AddDbMcpServers()
+            .AddDbMcpServerStates()
+            .AddDbMcpServerSettings()
+            .AddDbRoomMcpServers()
+            .AddDbFileVectorization()
+            .AddDbUserChatSettings()
+            .AddInvitationLink()
+            .AddDbDefaultAiProviders()
+            .AddDbAiModelSettings()
+            .AddDbChatMessageAttachment();
+    }
+}

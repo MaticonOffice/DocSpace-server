@@ -1,0 +1,167 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.EventBus.Extensions.Logger.Extensions;
+
+public static class IntegrationEventLogExtension
+{
+    public static ModelBuilderWrapper AddIntegrationEventLog(this ModelBuilderWrapper modelBuilder)
+    {
+        modelBuilder.Entity<IntegrationEventLogEntry>().Navigation(e => e.Tenant).AutoInclude(false);
+
+        modelBuilder
+            .Add(MySqlAddIntegrationEventLog, Provider.MySql)
+            .Add(PgSqlAddIntegrationEventLog, Provider.PostgreSql);
+
+        return modelBuilder;
+    }
+    extension(ModelBuilder modelBuilder)
+    {
+          public void MySqlAddIntegrationEventLog()
+          {
+                modelBuilder.Entity<IntegrationEventLogEntry>(entity =>
+                {
+                      entity.ToTable("event_bus_integration_event_log")
+                            .HasCharSet("utf8");
+
+                      entity.HasKey(e => e.EventId)
+                            .HasName("PRIMARY");
+
+                      entity.HasIndex(e => e.TenantId)
+                            .HasDatabaseName("tenant_id");
+
+                      entity.Property(e => e.EventId)
+                            .HasColumnName("event_id")
+                            .HasColumnType("char(38)")
+                            .HasCharSet("utf8")
+                            .UseCollation("utf8_general_ci")
+                            .IsRequired();
+
+                      entity.Property(e => e.Content)
+                            .HasColumnName("content")
+                            .HasColumnType("text")
+                            .HasCharSet("utf8")
+                            .UseCollation("utf8_general_ci")
+                            .IsRequired();
+
+                      entity.Property(e => e.CreateOn)
+                            .HasColumnName("create_on")
+                            .HasColumnType("datetime")
+                            .IsRequired();
+
+                      entity.Property(e => e.CreateBy)
+                            .HasColumnName("create_by")
+                            .HasColumnType("char(38)")
+                            .HasCharSet("utf8")
+                            .UseCollation("utf8_general_ci")
+                            .IsRequired();
+
+                      entity.Property(e => e.State)
+                            .HasColumnName("state")
+                            .HasColumnType("int(11)")
+                            .IsRequired();
+
+                      entity.Property(e => e.TimesSent)
+                            .HasColumnName("times_sent")
+                            .HasColumnType("int(11)")
+                            .IsRequired();
+
+                      entity.Property(e => e.EventTypeName)
+                            .HasColumnName("event_type_name")
+                            .HasColumnType("varchar")
+                            .HasCharSet("utf8")
+                            .UseCollation("utf8_general_ci")
+                            .IsRequired();
+
+                      entity.Property(e => e.TenantId)
+                            .HasColumnName("tenant_id")
+                            .HasColumnType("int(11)")
+                            .IsRequired();
+                });
+          }
+
+          public void PgSqlAddIntegrationEventLog()
+          {
+                modelBuilder.Entity<IntegrationEventLogEntry>(entity =>
+                {
+                      entity.ToTable("event_bus_integration_event_log");
+
+                      entity.HasKey(e => e.EventId)
+                            .HasName("pk_event_bus_integration_event_log");
+
+                      entity.HasIndex(e => e.TenantId)
+                            .HasDatabaseName("ix_tenant_id");
+
+                      entity.Property(e => e.EventId)
+                            .HasColumnName("event_id")
+                            .HasColumnType("uuid")
+                            .IsRequired();
+
+                      entity.Property(e => e.Content)
+                            .HasColumnName("content")
+                            .HasColumnType("text")
+                            .IsRequired();
+
+                      entity.Property(e => e.CreateOn)
+                            .HasColumnName("create_on")
+                            .HasColumnType("timestamptz")
+                            .IsRequired();
+
+                      entity.Property(e => e.CreateBy)
+                            .HasColumnName("create_by")
+                            .HasColumnType("uuid")
+                            .IsRequired();
+
+                      entity.Property(e => e.State)
+                            .HasColumnName("state")
+                            .HasColumnType("integer")
+                            .IsRequired();
+
+                      entity.Property(e => e.TimesSent)
+                            .HasColumnName("times_sent")
+                            .HasColumnType("integer")
+                            .IsRequired();
+
+                      entity.Property(e => e.EventTypeName)
+                            .HasColumnName("event_type_name")
+                            .HasColumnType("varchar")
+                            .IsRequired();
+
+                      entity.Property(e => e.TenantId)
+                            .HasColumnName("tenant_id")
+                            .HasColumnType("integer")
+                            .IsRequired();
+                });
+          }
+    }
+}

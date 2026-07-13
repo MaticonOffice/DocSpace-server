@@ -1,0 +1,401 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Core.Sms;
+
+[Scope]
+public class SmsProviderManager(ConsumerFactory consumerFactory)
+{
+    public SmscProvider SmscProvider => consumerFactory.Get<SmscProvider>();
+    public ClickatellProvider ClickatellProvider => consumerFactory.Get<ClickatellProvider>();
+    public TwilioProvider TwilioProvider => consumerFactory.Get<TwilioProvider>();
+    public ClickatellProvider ClickatellUSAProvider => consumerFactory.Get<ClickatellUSAProvider>();
+    public TwilioProvider TwilioSaaSProvider => consumerFactory.Get<TwilioSaaSProvider>();
+
+    public bool Enabled()
+    {
+        return SmscProvider.Enable() || ClickatellProvider.Enable() || ClickatellUSAProvider.Enable() || TwilioProvider.Enable() || TwilioSaaSProvider.Enable();
+    }
+
+    public async Task<bool> SendMessageAsync(string number, string message)
+    {
+        if (!Enabled())
+        {
+            return false;
+        }
+
+        SmsProvider provider = null;
+        if (ClickatellProvider.Enable())
+        {
+            provider = ClickatellProvider;
+        }
+
+        string smsUsa;
+        if (ClickatellUSAProvider.Enable()
+            && !string.IsNullOrEmpty(smsUsa = ClickatellProvider["clickatellUSA"]) && Regex.IsMatch(number, smsUsa))
+        {
+            provider = ClickatellUSAProvider;
+        }
+
+        if (provider == null && TwilioProvider.Enable())
+        {
+            provider = TwilioProvider;
+        }
+
+        if (provider == null && TwilioSaaSProvider.Enable())
+        {
+            provider = TwilioSaaSProvider;
+        }
+
+        if (SmscProvider.Enable()
+            && (provider == null
+                || SmscProvider.SuitableNumber(number)))
+        {
+            provider = SmscProvider;
+        }
+
+        if (provider == null)
+        {
+            return false;
+        }
+
+        return await provider.SendMessageAsync(number, message);
+    }
+}
+
+public abstract class SmsProvider : Consumer
+{
+    protected ILogger<SmsProvider> Log { get; }
+    protected IHttpClientFactory ClientFactory { get; }
+    protected ICache MemoryCache { get; set; }
+
+    protected virtual string SendMessageUrlFormat { get; set; }
+    protected virtual string GetBalanceUrlFormat { get; set; }
+    protected virtual string Key { get; set; }
+    protected virtual string Secret { get; set; }
+    protected virtual string Sender { get; set; }
+
+    protected SmsProvider()
+    {
+    }
+
+    protected SmsProvider(
+        TenantManager tenantManager,
+        CoreBaseSettings coreBaseSettings,
+        CoreSettings coreSettings,
+        IConfiguration configuration,
+        ICacheNotify<ConsumerCacheItem> cache,
+        ConsumerFactory consumerFactory,
+        ILogger<SmsProvider> logger,
+        IHttpClientFactory clientFactory,
+        ICache memCache,
+        string name, int order, bool paid, Dictionary<string, string> props, Dictionary<string, string> additional = null)
+        : base(tenantManager, coreBaseSettings, coreSettings, configuration, cache, consumerFactory, name, order, paid, props, additional)
+    {
+        MemoryCache = memCache;
+        Log = logger;
+        ClientFactory = clientFactory;
+    }
+
+    public virtual bool Enable()
+    {
+        return true;
+    }
+
+    private string SendMessageUrl()
+    {
+        return SendMessageUrlFormat
+            .Replace("{key}", Key)
+            .Replace("{secret}", Secret)
+            .Replace("{sender}", Sender);
+    }
+
+    public virtual async Task<bool> SendMessageAsync(string number, string message)
+    {
+        try
+        {
+            var url = SendMessageUrl();
+            url = url.Replace("{phone}", number).Replace("{text}", HttpUtility.UrlEncode(message));
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-www-form-urlencoded");
+
+#pragma warning disable CA2000
+            var httpClient = ClientFactory.CreateClient();
+#pragma warning restore CA2000
+            
+            httpClient.Timeout = TimeSpan.FromMilliseconds(15000);
+
+            using var response = await httpClient.SendAsync(request);
+            var result = await response.Content.ReadAsStringAsync();
+            Log.InformationSMSWasSend(number, result);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.ErrorSendSms(ex);
+        }
+        return false;
+    }
+}
+
+public class SmscProvider : SmsProvider, IValidateKeysProvider
+{
+    public SmscProvider()
+    {
+    }
+
+    public SmscProvider(
+        TenantManager tenantManager,
+        CoreBaseSettings coreBaseSettings,
+        CoreSettings coreSettings,
+        IConfiguration configuration,
+        ICacheNotify<ConsumerCacheItem> cache,
+        ConsumerFactory consumerFactory,
+        ILogger<SmsProvider> options,
+        IHttpClientFactory clientFactory,
+        ICache memCache,
+        string name, int order, bool paid, Dictionary<string, string> props, Dictionary<string, string> additional = null)
+        : base(tenantManager, coreBaseSettings, coreSettings, configuration, cache, consumerFactory, options, clientFactory, memCache, name, order, paid, props, additional)
+    {
+    }
+
+    protected override string SendMessageUrlFormat => "https://smsc.ru/sys/send.php?login={key}&psw={secret}&phones={phone}&mes={text}&fmt=3&sender={sender}&charset=utf-8";
+
+    protected override string GetBalanceUrlFormat => "https://smsc.ru/sys/balance.php?login={key}&psw={secret}";
+
+    protected override string Key => this["smsclogin"];
+
+    protected override string Secret => this["smscpsw"];
+
+    protected override string Sender => this["smscsender"];
+
+    public override bool Enable()
+    {
+        return
+            !string.IsNullOrEmpty(Key)
+            && !string.IsNullOrEmpty(Secret);
+    }
+
+    public async Task<string> GetBalanceAsync(Tenant tenant, bool eraseCache = false)
+    {
+        var tenantCache = tenant?.Id ?? Tenant.DefaultTenant;
+
+        var key = "sms/smsc/" + tenantCache;
+        if (eraseCache)
+        {
+            MemoryCache.Remove(key);
+        }
+
+        var balance = MemoryCache.Get<string>(key);
+
+        if (string.IsNullOrEmpty(balance))
+        {
+            try
+            {
+                var url = GetBalanceUrl();
+
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-www-form-urlencoded");
+
+#pragma warning disable CA2000
+                var httpClient = ClientFactory.CreateClient();
+#pragma warning restore CA2000
+                httpClient.Timeout = TimeSpan.FromMilliseconds(1000);
+
+                using var response = await httpClient.SendAsync(request);
+                var result = await response.Content.ReadAsStringAsync();
+                Log.InformationSmsBalaceReturned(result);
+
+                balance = result;
+            }
+            catch (Exception ex)
+            {
+                Log.ErrorRequestSms(ex);
+                balance = string.Empty;
+            }
+
+            MemoryCache.Insert(key, balance, TimeSpan.FromMinutes(1));
+        }
+
+        return balance;
+    }
+
+    private string GetBalanceUrl()
+    {
+        return GetBalanceUrlFormat
+            .Replace("{key}", Key)
+            .Replace("{secret}", Secret);
+    }
+
+    public bool SuitableNumber(string number)
+    {
+        var smsCis = this["smsccis"];
+        return !string.IsNullOrEmpty(smsCis) && Regex.IsMatch(number, smsCis);
+    }
+
+    public async Task<bool> ValidateKeysAsync()
+    {
+        return double.TryParse(await GetBalanceAsync(TenantManager.GetCurrentTenant(false), true), NumberStyles.Number, CultureInfo.InvariantCulture, out var balance) && balance > 0;
+    }
+}
+
+public class ClickatellProvider : SmsProvider
+{
+    protected override string SendMessageUrlFormat => "https://platform.clickatell.com/messages/http/send?apiKey={secret}&to={phone}&content={text}&from={sender}";
+
+    protected override string Secret => this["clickatellapiKey"];
+
+    protected override string Sender => this["clickatellSender"];
+
+    public override bool Enable()
+    {
+        return !string.IsNullOrEmpty(Secret);
+    }
+
+    public ClickatellProvider()
+    {
+    }
+
+    public ClickatellProvider(
+        TenantManager tenantManager,
+        CoreBaseSettings coreBaseSettings,
+        CoreSettings coreSettings,
+        IConfiguration configuration,
+        ICacheNotify<ConsumerCacheItem> cache,
+        ConsumerFactory consumerFactory,
+        ILogger<ClickatellProvider> options,
+        IHttpClientFactory clientFactory,
+        ICache memCache,
+        string name, int order, bool paid, Dictionary<string, string> props, Dictionary<string, string> additional = null)
+        : base(tenantManager, coreBaseSettings, coreSettings, configuration, cache, consumerFactory, options, clientFactory, memCache, name, order, paid, props, additional)
+    {
+    }
+}
+
+public class ClickatellUSAProvider : ClickatellProvider
+{
+    public ClickatellUSAProvider()
+    {
+    }
+
+    public ClickatellUSAProvider(
+        TenantManager tenantManager,
+        CoreBaseSettings coreBaseSettings,
+        CoreSettings coreSettings,
+        IConfiguration configuration,
+        ICacheNotify<ConsumerCacheItem> cache,
+        ConsumerFactory consumerFactory,
+        ILogger<ClickatellUSAProvider> options,
+        IHttpClientFactory clientFactory,
+        ICache memCache,
+        string name, int order, bool paid, Dictionary<string, string> additional = null)
+        : base(tenantManager, coreBaseSettings, coreSettings, configuration, cache, consumerFactory, options, clientFactory, memCache, name, order, paid, null, additional)
+    {
+    }
+}
+
+[Scope]
+public class TwilioProvider : SmsProvider, IValidateKeysProvider
+{
+    protected override string Key
+    {
+        get => this["twilioKeySid"];
+        set { }
+    }
+
+    protected override string Secret
+    {
+        get => this["twilioKeySecret"];
+        set { }
+    }
+
+    protected string AccountSid => this["twilioAccountSid"];
+
+    protected string AuthToken => this["twilioAuthToken"];
+
+    protected override string Sender => this["twiliosender"];
+
+    public override bool Enable()
+    {
+        return
+            !string.IsNullOrEmpty(Key)
+            && !string.IsNullOrEmpty(Secret)
+            && !string.IsNullOrEmpty(AccountSid)
+            && !string.IsNullOrEmpty(Sender);
+    }
+
+    public override Task<bool> SendMessageAsync(string number, string message)
+    {
+        if (!number.StartsWith('+'))
+        {
+            number = "+" + number;
+        }
+
+        var twilioRestClient = new TwilioRestClient(Key, Secret, AccountSid);
+
+        try
+        {
+            var smsMessage = MessageResource.Create(new PhoneNumber(number), body: message, from: new PhoneNumber(Sender), client: twilioRestClient);
+            Log.InformationSmsWasSendTo(number, smsMessage.Status);
+            if (!smsMessage.ErrorCode.HasValue)
+            {
+                return Task.FromResult(true);
+            }
+            Log.ErrorSendSmsWithCode(smsMessage.ErrorCode.Value, smsMessage.ErrorMessage);
+        }
+        catch (Exception ex)
+        {
+            Log.ErrorSendSmsViaTiwilio(ex);
+        }
+
+        return Task.FromResult(false);
+    }
+
+
+    public async Task<bool> ValidateKeysAsync()
+    {
+        try
+        {
+            await IncomingPhoneNumberResource.ReadAsync(client: new TwilioRestClient(AccountSid, AuthToken));
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+}
+
+[Scope]
+public class TwilioSaaSProvider : TwilioProvider;

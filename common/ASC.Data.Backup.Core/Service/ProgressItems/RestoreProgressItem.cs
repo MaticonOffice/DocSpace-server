@@ -1,0 +1,355 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Core.Common.Settings;
+using ASC.EventBus.Abstractions;
+using ASC.Files.Core.Configuration;
+using ASC.Web.Core.RemovePortal;
+
+namespace ASC.Data.Backup.Services;
+
+[Transient]
+public class RestoreProgressItem : BaseBackupProgressItem
+{
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<RestoreProgressItem> _logger;
+    private readonly ICache _cache;
+    private readonly IEventBus _eventBus;
+    private TenantManager _tenantManager;
+    private BackupStorageFactory _backupStorageFactory;
+    private readonly NotifyHelper _notifyHelper;
+    private BackupRepository _backupRepository;
+    private readonly CoreBaseSettings _coreBaseSettings;
+    private SocketManager _socketManager;
+
+    private string _region;
+    private string _upgradesPath;
+    private string _serverBaseUri;
+
+    public RestoreProgressItem()
+    {
+
+    }
+
+    public RestoreProgressItem(
+        IConfiguration configuration,
+        ILogger<RestoreProgressItem> logger,
+        ICache cache,
+        IEventBus eventBus,
+        IServiceScopeFactory serviceScopeFactory,
+        NotifyHelper notifyHelper,
+        CoreBaseSettings coreBaseSettings)
+        : base(serviceScopeFactory)
+    {
+        _configuration = configuration;
+        _logger = logger;
+        _cache = cache;
+        _eventBus = eventBus;
+        _notifyHelper = notifyHelper;
+        _coreBaseSettings = coreBaseSettings;
+    }
+
+    public BackupStorageType StorageType { get; set; }
+    public string StoragePath { get; set; }
+    public bool Notify { get; set; }
+    public Dictionary<string, string> StorageParams { get; set; }
+    public string TempFolder { get; set; }
+
+    public void Init(StartRestoreRequest request, string tempFolder, string upgradesPath, string region = "current")
+    {
+        Init();
+        BackupProgressItemType = BackupProgressItemType.Restore;
+        TenantId = request.TenantId;
+        NewTenantId = request.TenantId;
+        Notify = request.NotifyAfterCompletion;
+        StoragePath = request.FilePathOrId;
+        StorageType = request.StorageType;
+        StorageParams = request.StorageParams;
+        TempFolder = tempFolder;
+        _upgradesPath = upgradesPath;
+        _region = region;
+        _serverBaseUri = request.ServerBaseUri;
+        Dump = request.Dump;
+    }
+
+    protected override async Task DoJob()
+    {
+        Tenant tenant = null;
+        var tempFile = "";
+        var socketTenant = TenantId;
+        await using var scope = _serviceScopeProvider.CreateAsyncScope();
+        _socketManager = scope.ServiceProvider.GetService<SocketManager>();
+
+        var columnMapper = new ColumnMapper();
+
+        try
+        {
+            _tenantManager = scope.ServiceProvider.GetService<TenantManager>();
+            _backupStorageFactory = scope.ServiceProvider.GetService<BackupStorageFactory>();
+            _backupRepository = scope.ServiceProvider.GetService<BackupRepository>();
+
+            tenant = await _tenantManager.GetTenantAsync(TenantId);
+            _tenantManager.SetCurrentTenant(tenant);
+            await _socketManager.RestoreProgressAsync(socketTenant, Dump, 0);
+
+            using var restoreTask = scope.ServiceProvider.GetService<RestorePortalTask>();
+
+            var storage = await _backupStorageFactory.GetBackupStorageAsync(StorageType, TenantId, StorageParams);
+
+            tempFile = await storage.DownloadAsync(StoragePath, TempFolder);
+
+            if (!_coreBaseSettings.Standalone)
+            {
+                var shaHash = BackupWorker.GetBackupHashSHA(tempFile);
+                var record = await _backupRepository.GetBackupRecordAsync(shaHash, TenantId);
+
+                if (record == null)
+                {
+                    var md5Hash = await BackupWorker.GetBackupHashMD5Async(tempFile, S3Storage.ChunkSize);
+                    record = await _backupRepository.GetBackupRecordAsync(md5Hash, TenantId);
+                    if (record == null)
+                    {
+                        throw new Exception(BackupResource.BackupNotFound);
+                    }
+                }
+            }
+
+            _notifyHelper.SetServerBaseUri(_serverBaseUri);
+
+            if (Dump)
+            {
+                var tenants = await _tenantManager.GetTenantsAsync();
+
+                foreach (var t in tenants)
+                {
+                    await _notifyHelper.SendAboutRestoreStartedAsync(t, Notify);
+                    t.SetStatus(TenantStatus.Restoring);
+                    await _tenantManager.SaveTenantAsync(t);
+                }
+            }
+            else
+            {
+                await _notifyHelper.SendAboutRestoreStartedAsync(tenant, Notify);
+                tenant.SetStatus(TenantStatus.Restoring);
+                await _tenantManager.SaveTenantAsync(tenant);
+            }
+
+            Percentage = 10;
+
+            columnMapper.SetMapping("tenants_tenants", "alias", tenant.Alias, Guid.Parse(Id).ToString("N"));
+            columnMapper.Commit();
+
+            restoreTask.Init(_region, tempFile, Dump, TenantId, columnMapper, _upgradesPath, CancellationToken);
+            restoreTask.ProgressChanged = async args =>
+            {
+                if (CancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                Percentage = 10d + 0.65 * args.Progress;
+                await _socketManager.RestoreProgressAsync(socketTenant, Dump, (int)Percentage);
+                await PublishChanges();
+            };
+
+            await restoreTask.RunJob();
+
+            NewTenantId = columnMapper.GetTenantMapping();
+
+            await _socketManager.RestoreProgressAsync(socketTenant, Dump, (int)Percentage);
+            await PublishChanges();
+
+            if (restoreTask.Dump)
+            {
+                _cache.Reset();
+
+                var tenants = await _tenantManager.GetTenantsAsync();
+                foreach (var t in tenants)
+                {
+                    await _notifyHelper.SendAboutRestoreCompletedAsync(t, Notify);
+                }
+            }
+            else
+            {
+                var restoredTenant = await _tenantManager.GetTenantAsync(columnMapper.GetTenantMapping());
+                restoredTenant.SetStatus(TenantStatus.Active);
+                restoredTenant.Alias = tenant.Alias;
+                restoredTenant.PaymentId = string.IsNullOrEmpty(restoredTenant.PaymentId) ? _configuration["core:payment:region"] + TenantId : restoredTenant.PaymentId;
+
+                if (string.IsNullOrEmpty(restoredTenant.MappedDomain) && !string.IsNullOrEmpty(tenant.MappedDomain))
+                {
+                    restoredTenant.MappedDomain = tenant.MappedDomain;
+                }
+
+                await _tenantManager.RestoreTenantAsync(tenant, restoredTenant);
+                TenantId = restoredTenant.Id;
+
+                try
+                {
+                    await _notifyHelper.SendAboutRestoreCompletedAsync(restoredTenant, Notify);
+                }
+                catch (Exception error)
+                {
+                    _logger.ErrorNotifyComplete(error);
+                }
+            }
+
+            Percentage = 75;
+
+            try
+            {
+                var webstudioDbContextFactory = scope.ServiceProvider.GetService<IDbContextFactory<WebstudioDbContext>>();
+
+                var tfaSettings = new[] { TfaAppAuthSettings.ID, TfaAppUserSettings.ID, StudioSmsNotificationSettings.ID };
+
+                await using var webstudioContext = await webstudioDbContextFactory.CreateDbContextAsync();
+
+                await webstudioContext.WebstudioSettings
+                    .Where(s => (restoreTask.Dump || s.TenantId == TenantId) && tfaSettings.Contains(s.Id))
+                    .ExecuteDeleteAsync();
+
+                await webstudioContext.SaveChangesAsync();
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorClear2faSettings(error);
+            }
+
+            try
+            {
+                var settingsManager = scope.ServiceProvider.GetRequiredService<SettingsManager>();
+                var defaultTemplateSettings = await settingsManager.LoadAsync<DefaultTemplateSettings>();
+                if (defaultTemplateSettings.Items.Any(i => i.SelectedFile != null))
+                {
+                    var helper = scope.ServiceProvider.GetRequiredService<DefaultTemplateSettingsHelper>();
+                    var settings = await helper.RestoreSettingsAsync();
+                    _ = await settingsManager.SaveAsync(settings);
+                }
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorUpdateDefaultTemplateSettings(error);
+            }
+
+            try
+            {
+                await _socketManager.RestoreProgressAsync(socketTenant, Dump, (int)Percentage);
+                await PublishChanges();
+
+                File.Delete(tempFile);
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorDeleteFiles(error);
+            }
+
+            Percentage = 100;
+            IsCompleted = true;
+        }
+        catch (DbBackupException error)
+        {
+            _logger.ErrorRestoreProgressItem(error);
+            Exception = new DbBackupException(BackupResource.BackupInvalid, error);
+            IsCompleted = true;
+
+            if (tenant != null)
+            {
+                tenant.SetStatus(TenantStatus.Active);
+                await _tenantManager.SaveTenantAsync(tenant);
+            }
+        }
+        catch (Exception error)
+        {
+            IsCompleted = true;
+
+            if (CancellationToken.IsCancellationRequested)
+            {
+                Status = DistributedTaskStatus.Canceled;
+                Warning = ASC.AuditTrail.AuditReportResource.RestoreCancelled;
+                _logger.InfoRestoreCancelled();
+
+                if (!Dump)
+                {
+                    var restoredTenantId = columnMapper.GetTenantMapping();
+                    var restoredTenant = await _tenantManager.GetTenantAsync(restoredTenantId);
+                    await _tenantManager.RemoveTenantAsync(restoredTenant);
+                    await _eventBus.PublishAsync(new RemovePortalIntegrationEvent(restoredTenant.OwnerId, restoredTenant.Id));
+                }
+            }
+            else
+            {
+                Exception = error;
+                _logger.ErrorRestoreProgressItem(error);
+            }
+
+            if (tenant != null)
+            {
+                if (Dump)
+                {
+                    var tenants = await _tenantManager.GetTenantsAsync(false);
+                    foreach (var t in tenants.Where(t => t.Status == TenantStatus.Restoring))
+                    {
+                        t.SetStatus(TenantStatus.Active);
+                        await _tenantManager.SaveTenantAsync(t);
+                    }
+                }
+                else
+                {
+                    tenant.SetStatus(TenantStatus.Active);
+                    await _tenantManager.SaveTenantAsync(tenant);
+                }
+            }
+        }
+        finally
+        {
+            try
+            {
+                await _socketManager.EndRestoreAsync(socketTenant, Dump, ToBackupProgress());
+                await PublishChanges();
+            }
+            catch (Exception error)
+            {
+                _logger.ErrorPublish(error);
+            }
+
+            if (File.Exists(tempFile))
+            {
+                File.Delete(tempFile);
+            }
+        }
+    }
+
+    public override object Clone()
+    {
+        return MemberwiseClone();
+    }
+}

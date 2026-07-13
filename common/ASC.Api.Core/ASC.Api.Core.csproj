@@ -1,0 +1,65 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>1701;1702;1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Asp.Versioning.Http" />
+    <PackageReference Include="Asp.Versioning.Mvc" />
+    <PackageReference Include="Asp.Versioning.Mvc.ApiExplorer" />
+    <PackageReference Include="AspNetCore.HealthChecks.Kafka" />
+    <PackageReference Include="AspNetCore.HealthChecks.MySql" />
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" />
+    <PackageReference Include="AspNetCore.HealthChecks.Rabbitmq" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" />
+    <PackageReference Include="AspNetCore.HealthChecks.UI.Client" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Magick.NET-Q8-AnyCPU">
+      <PrivateAssets>compile</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" />
+    <PackageReference Include="NLog.Targets.ElasticSearch" />
+    <PackageReference Include="NLog.Web.AspNetCore" />
+	<PackageReference Include="OpenTelemetry" />
+	<PackageReference Include="OpenTelemetry.Api" />
+    <PackageReference Include="OpenTelemetry.Exporter.InfluxDB" />
+	<PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+	<PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+	<PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+	<PackageReference Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" />
+	<PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+	<PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Process" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.StackExchangeRedis" />
+    <PackageReference Include="RedisRateLimiting" />
+    <PackageReference Include="RedisRateLimiting.AspNetCore" />
+    <PackageReference Include="Scalar.AspNetCore" />
+    <PackageReference Include="Scalar.AspNetCore.Swashbuckle" />
+    <PackageReference Include="StackExchange.Redis.Extensions.AspNetCore" />
+    <PackageReference Include="StackExchange.Redis.Extensions.Newtonsoft" />
+	<PackageReference Include="Autofac.Extensions.DependencyInjection" />
+	<PackageReference Include="Swashbuckle.AspNetCore" />
+
+	<PackageReference Include="Swashbuckle.AspNetCore.Annotations" />
+	<PackageReference Include="ZiggyCreatures.FusionCache.Backplane.StackExchangeRedis" />
+	<PackageReference Include="ZiggyCreatures.FusionCache.OpenTelemetry" />
+	<PackageReference Include="ZiggyCreatures.FusionCache.Serialization.SystemTextJson" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\web\ASC.Web.Core\ASC.Web.Core.csproj" />
+    <ProjectReference Include="..\ASC.EventBus.ActiveMQ\ASC.EventBus.ActiveMQ.csproj" />
+    <ProjectReference Include="..\ASC.EventBus.Extensions.Logger\ASC.EventBus.Extensions.Logger.csproj" />
+    <ProjectReference Include="..\ASC.EventBus.RabbitMQ\ASC.EventBus.RabbitMQ.csproj" />
+    <ProjectReference Include="..\ASC.EventBus.InMemory\ASC.EventBus.InMemory.csproj" />
+    <ProjectReference Include="..\ASC.EventBus.RedisMQ\ASC.EventBus.RedisMQ.csproj" />
+    <ProjectReference Include="..\ASC.Webhooks.Core\ASC.Webhooks.Core.csproj" />
+    <ProjectReference Include="..\services\ASC.AuditTrail\ASC.AuditTrail.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,993 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Web.Core.WhiteLabel;
+
+public class TenantWhiteLabelSettings : ISettings<TenantWhiteLabelSettings>
+{
+    public const string DefaultLogoText = BaseWhiteLabelSettings.DefaultLogoText;
+
+    public static readonly List<string> AvailableExtensions = [".bmp", ".jpg", ".jpeg", ".ico", ".png", ".svg"];
+
+    #region Logos information: extension, isDefault, text for img auto generating
+
+    public string LogoLightSmallExt { get; set; }
+    public string DarkLogoLightSmallExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoLightSmall")]
+    public bool IsDefaultLogoLightSmall { get; set; }
+
+    public string LogoDarkExt { get; set; }
+    public string DarkLogoDarkExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoDark")]
+    public bool IsDefaultLogoDark { get; set; }
+
+    public string LogoFaviconExt { get; set; }
+    public string DarkLogoFaviconExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoFavicon")]
+    public bool IsDefaultLogoFavicon { get; set; }
+
+    public string LogoDocsEditorExt { get; set; }
+    public string DarkLogoDocsEditorExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoDocsEditor")]
+    public bool IsDefaultLogoDocsEditor { get; set; }
+
+    public string LogoDocsEditorEmbedExt { get; set; }
+    public string DarkLogoDocsEditorEmbedExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoDocsEditorEmbed")]
+    public bool IsDefaultLogoDocsEditorEmbed { get; set; }
+
+    public string LogoLeftMenuExt { get; set; }
+    public string DarkLogoLeftMenuExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoLeftMenu")]
+    public bool IsDefaultLogoLeftMenu { get; set; }
+
+    public string LogoAboutPageExt { get; set; }
+    public string DarkLogoAboutPageExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoAboutPage")]
+    public bool IsDefaultLogoAboutPage { get; set; }
+
+    public string LogoSpreadsheetEditorExt { get; set; }
+    public string DarkLogoSpreadsheetEditorExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoSpreadsheetEditor")]
+    public bool IsDefaultLogoSpreadsheetEditor { get; set; }
+
+    public string LogoSpreadsheetEditorEmbedExt { get; set; }
+    public string DarkLogoSpreadsheetEditorEmbedExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoSpreadsheetEditorEmbed")]
+    public bool IsDefaultLogoSpreadsheetEditorEmbed { get; set; }
+
+    public string LogoPresentationEditorExt { get; set; }
+    public string DarkLogoPresentationEditorExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoPresentationEditor")]
+    public bool IsDefaultLogoPresentationEditor { get; set; }
+
+    public string LogoPresentationEditorEmbedExt { get; set; }
+    public string DarkLogoPresentationEditorEmbedExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoPresentationEditorEmbed")]
+    public bool IsDefaultLogoPresentationEditorEmbed { get; set; }
+
+    public string LogoPdfEditorExt { get; set; }
+    public string DarkLogoPdfEditorExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoPdfEditor")]
+    public bool IsDefaultLogoPdfEditor { get; set; }
+
+    public string LogoPdfEditorEmbedExt { get; set; }
+    public string DarkLogoPdfEditorEmbedExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoPdfEditorEmbed")]
+    public bool IsDefaultLogoPdfEditorEmbed { get; set; }
+
+    public string LogoDiagramEditorExt { get; set; }
+    public string DarkLogoDiagramEditorExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoDiagramEditor")]
+    public bool IsDefaultLogoDiagramEditor { get; set; }
+
+    public string LogoDiagramEditorEmbedExt { get; set; }
+    public string DarkLogoDiagramEditorEmbedExt { get; set; }
+
+    [JsonPropertyName("DefaultLogoDiagramEditorEmbed")]
+    public bool IsDefaultLogoDiagramEditorEmbed { get; set; }
+
+    public string LogoText { get; set; }
+
+    public async Task<string> GetLogoTextAsync(SettingsManager settingsManager)
+    {
+        if (!string.IsNullOrEmpty(LogoText))
+        {
+            return LogoText;
+        }
+
+        var partnerSettings = await settingsManager.LoadForDefaultTenantAsync<TenantWhiteLabelSettings>();
+        return string.IsNullOrEmpty(partnerSettings.LogoText) ? DefaultLogoText : partnerSettings.LogoText;
+    }
+
+    public void SetLogoText(string val)
+    {
+        LogoText = string.IsNullOrWhiteSpace(val) || val == DefaultLogoText ? null : val;
+    }
+
+    public async Task<bool> GetIsDefault(SettingsManager settingsManager)
+    {
+        if (!IsDefault())
+        {
+            return false;
+        }
+
+        var partnerSettings = await settingsManager.LoadForDefaultTenantAsync<TenantWhiteLabelSettings>();
+        return partnerSettings.IsDefault();
+    }
+
+    #endregion
+
+    #region Logo available sizes
+
+    public static readonly IMagickGeometry LogoLightSmallSize = new MagickGeometry(422, 48);
+    public static readonly IMagickGeometry LogoLoginPageSize = new MagickGeometry(772, 88);
+    public static readonly IMagickGeometry LogoFaviconSize = new MagickGeometry(32, 32);
+    public static readonly IMagickGeometry LogoDocsEditorSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoDocsEditorEmbedSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoLeftMenuSize = new MagickGeometry(56, 56);
+    public static readonly IMagickGeometry LogoAboutPageSize = new MagickGeometry(442, 48);
+    public static readonly IMagickGeometry LogoNotificationSize = new MagickGeometry(386, 44);
+    public static readonly IMagickGeometry LogoSpreadsheetEditorSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoSpreadsheetEditorEmbedSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoPresentationEditorSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoPresentationEditorEmbedSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoPdfEditorSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoPdfEditorEmbedSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoDiagramEditorSize = new MagickGeometry(172, 40);
+    public static readonly IMagickGeometry LogoDiagramEditorEmbedSize = new MagickGeometry(172, 40);
+
+    public static IMagickGeometry GetSize(WhiteLabelLogoType type)
+    {
+        return type switch
+        {
+            WhiteLabelLogoType.LightSmall => LogoLightSmallSize,
+            WhiteLabelLogoType.LoginPage => LogoLoginPageSize,
+            WhiteLabelLogoType.Favicon => LogoFaviconSize,
+            WhiteLabelLogoType.DocsEditor => LogoDocsEditorSize,
+            WhiteLabelLogoType.DocsEditorEmbed => LogoDocsEditorEmbedSize,
+            WhiteLabelLogoType.LeftMenu => LogoLeftMenuSize,
+            WhiteLabelLogoType.AboutPage => LogoAboutPageSize,
+            WhiteLabelLogoType.SpreadsheetEditor => LogoSpreadsheetEditorSize,
+            WhiteLabelLogoType.SpreadsheetEditorEmbed => LogoSpreadsheetEditorEmbedSize,
+            WhiteLabelLogoType.PresentationEditor => LogoPresentationEditorSize,
+            WhiteLabelLogoType.PresentationEditorEmbed => LogoPresentationEditorEmbedSize,
+            WhiteLabelLogoType.PdfEditor => LogoPdfEditorSize,
+            WhiteLabelLogoType.PdfEditorEmbed => LogoPdfEditorEmbedSize,
+            WhiteLabelLogoType.DiagramEditor => LogoDiagramEditorSize,
+            WhiteLabelLogoType.DiagramEditorEmbed => LogoDiagramEditorEmbedSize,
+            WhiteLabelLogoType.Notification => LogoNotificationSize,
+            _ => new MagickGeometry()
+        };
+    }
+
+    #endregion
+
+    #region ISettings Members
+
+    public TenantWhiteLabelSettings GetDefault()
+    {
+        return new TenantWhiteLabelSettings
+        {
+            LogoLightSmallExt = null,
+            DarkLogoLightSmallExt = null,
+
+            LogoDarkExt = null,
+            DarkLogoDarkExt = null,
+
+            LogoFaviconExt = null,
+            DarkLogoFaviconExt = null,
+
+            LogoDocsEditorExt = null,
+            DarkLogoDocsEditorExt = null,
+
+            LogoDocsEditorEmbedExt = null,
+            DarkLogoDocsEditorEmbedExt = null,
+
+            LogoLeftMenuExt = null,
+            DarkLogoLeftMenuExt = null,
+
+            LogoAboutPageExt = null,
+            DarkLogoAboutPageExt = null,
+
+            LogoSpreadsheetEditorExt = null,
+            DarkLogoSpreadsheetEditorExt = null,
+
+            LogoSpreadsheetEditorEmbedExt = null,
+            DarkLogoSpreadsheetEditorEmbedExt = null,
+
+            LogoPresentationEditorExt = null,
+            DarkLogoPresentationEditorExt = null,
+
+            LogoPresentationEditorEmbedExt = null,
+            DarkLogoPresentationEditorEmbedExt = null,
+
+            LogoPdfEditorExt = null,
+            DarkLogoPdfEditorExt = null,
+
+            LogoPdfEditorEmbedExt = null,
+            DarkLogoPdfEditorEmbedExt = null,
+
+            LogoDiagramEditorExt = null,
+            DarkLogoDiagramEditorExt = null,
+
+            LogoDiagramEditorEmbedExt = null,
+            DarkLogoDiagramEditorEmbedExt = null,
+
+            IsDefaultLogoLightSmall = true,
+            IsDefaultLogoDark = true,
+            IsDefaultLogoFavicon = true,
+            IsDefaultLogoDocsEditor = true,
+            IsDefaultLogoDocsEditorEmbed = true,
+            IsDefaultLogoLeftMenu = true,
+            IsDefaultLogoAboutPage = true,
+            IsDefaultLogoSpreadsheetEditor = true,
+            IsDefaultLogoSpreadsheetEditorEmbed = true,
+            IsDefaultLogoPresentationEditor = true,
+            IsDefaultLogoPresentationEditorEmbed = true,
+            IsDefaultLogoPdfEditor = true,
+            IsDefaultLogoPdfEditorEmbed = true,
+            IsDefaultLogoDiagramEditor = true,
+            IsDefaultLogoDiagramEditorEmbed = true,
+
+            LogoText = null
+        };
+    }
+
+    public DateTime LastModified { get; set; }
+
+    public static Guid ID => new("{05d35540-c80b-4b17-9277-abd9e543bf93}");
+
+    #endregion
+
+    #region Get/Set IsDefault and Extension
+
+    private bool IsDefault()
+    {
+        return LogoText == null
+            && IsDefaultLogoLightSmall
+            && IsDefaultLogoDark
+            && IsDefaultLogoFavicon
+            && IsDefaultLogoDocsEditor
+            && IsDefaultLogoDocsEditorEmbed
+            && IsDefaultLogoLeftMenu
+            && IsDefaultLogoAboutPage
+            && IsDefaultLogoSpreadsheetEditor
+            && IsDefaultLogoSpreadsheetEditorEmbed
+            && IsDefaultLogoPresentationEditor
+            && IsDefaultLogoPresentationEditorEmbed
+            && IsDefaultLogoPdfEditor
+            && IsDefaultLogoPdfEditorEmbed
+            && IsDefaultLogoDiagramEditor
+            && IsDefaultLogoDiagramEditorEmbed;
+    }
+
+    public bool GetIsDefault(WhiteLabelLogoType type)
+    {
+        return type switch
+        {
+            WhiteLabelLogoType.LightSmall => IsDefaultLogoLightSmall,
+            WhiteLabelLogoType.LoginPage => IsDefaultLogoDark,
+            WhiteLabelLogoType.Favicon => IsDefaultLogoFavicon,
+            WhiteLabelLogoType.DocsEditor => IsDefaultLogoDocsEditor,
+            WhiteLabelLogoType.DocsEditorEmbed => IsDefaultLogoDocsEditorEmbed,
+            WhiteLabelLogoType.LeftMenu => IsDefaultLogoLeftMenu,
+            WhiteLabelLogoType.AboutPage => IsDefaultLogoAboutPage,
+            WhiteLabelLogoType.Notification => IsDefaultLogoDark,
+            WhiteLabelLogoType.SpreadsheetEditor => IsDefaultLogoSpreadsheetEditor,
+            WhiteLabelLogoType.SpreadsheetEditorEmbed => IsDefaultLogoSpreadsheetEditorEmbed,
+            WhiteLabelLogoType.PresentationEditor => IsDefaultLogoPresentationEditor,
+            WhiteLabelLogoType.PresentationEditorEmbed => IsDefaultLogoPresentationEditorEmbed,
+            WhiteLabelLogoType.PdfEditor => IsDefaultLogoPdfEditor,
+            WhiteLabelLogoType.PdfEditorEmbed => IsDefaultLogoPdfEditorEmbed,
+            WhiteLabelLogoType.DiagramEditor => IsDefaultLogoDiagramEditor,
+            WhiteLabelLogoType.DiagramEditorEmbed => IsDefaultLogoDiagramEditorEmbed,
+            _ => true
+        };
+    }
+
+    internal void SetIsDefault(WhiteLabelLogoType type, bool value)
+    {
+        switch (type)
+        {
+            case WhiteLabelLogoType.LightSmall:
+                IsDefaultLogoLightSmall = value;
+                break;
+            case WhiteLabelLogoType.LoginPage:
+                IsDefaultLogoDark = value;
+                break;
+            case WhiteLabelLogoType.Favicon:
+                IsDefaultLogoFavicon = value;
+                break;
+            case WhiteLabelLogoType.DocsEditor:
+                IsDefaultLogoDocsEditor = value;
+                break;
+            case WhiteLabelLogoType.DocsEditorEmbed:
+                IsDefaultLogoDocsEditorEmbed = value;
+                break;
+            case WhiteLabelLogoType.LeftMenu:
+                IsDefaultLogoLeftMenu = value;
+                break;
+            case WhiteLabelLogoType.AboutPage:
+                IsDefaultLogoAboutPage = value;
+                break;
+            case WhiteLabelLogoType.SpreadsheetEditor:
+                IsDefaultLogoSpreadsheetEditor = value;
+                break;
+            case WhiteLabelLogoType.SpreadsheetEditorEmbed:
+                IsDefaultLogoSpreadsheetEditorEmbed = value;
+                break;
+            case WhiteLabelLogoType.PresentationEditor:
+                IsDefaultLogoPresentationEditor = value;
+                break;
+            case WhiteLabelLogoType.PresentationEditorEmbed:
+                IsDefaultLogoPresentationEditorEmbed = value;
+                break;
+            case WhiteLabelLogoType.PdfEditor:
+                IsDefaultLogoPdfEditor = value;
+                break;
+            case WhiteLabelLogoType.PdfEditorEmbed:
+                IsDefaultLogoPdfEditorEmbed = value;
+                break;
+            case WhiteLabelLogoType.DiagramEditor:
+                IsDefaultLogoDiagramEditor = value;
+                break;
+            case WhiteLabelLogoType.DiagramEditorEmbed:
+                IsDefaultLogoDiagramEditorEmbed = value;
+                break;
+        }
+    }
+
+    public string GetExt(WhiteLabelLogoType type, bool dark)
+    {
+        return type switch
+        {
+            WhiteLabelLogoType.LightSmall => dark ? DarkLogoLightSmallExt : LogoLightSmallExt,
+            WhiteLabelLogoType.LoginPage => dark ? DarkLogoDarkExt : LogoDarkExt,
+            WhiteLabelLogoType.Favicon => dark ? DarkLogoFaviconExt : LogoFaviconExt,
+            WhiteLabelLogoType.DocsEditor => dark ? DarkLogoDocsEditorExt : LogoDocsEditorExt,
+            WhiteLabelLogoType.DocsEditorEmbed => dark ? DarkLogoDocsEditorEmbedExt : LogoDocsEditorEmbedExt,
+            WhiteLabelLogoType.LeftMenu => dark ? DarkLogoLeftMenuExt : LogoLeftMenuExt,
+            WhiteLabelLogoType.AboutPage => dark ? DarkLogoAboutPageExt : LogoAboutPageExt,
+            WhiteLabelLogoType.Notification => "png",
+            WhiteLabelLogoType.SpreadsheetEditor => dark ? DarkLogoSpreadsheetEditorExt : LogoSpreadsheetEditorExt,
+            WhiteLabelLogoType.SpreadsheetEditorEmbed => dark ? DarkLogoSpreadsheetEditorEmbedExt : LogoSpreadsheetEditorExt,
+            WhiteLabelLogoType.PresentationEditor => dark ? DarkLogoPresentationEditorExt : LogoPresentationEditorExt,
+            WhiteLabelLogoType.PresentationEditorEmbed => dark ? DarkLogoPresentationEditorEmbedExt : LogoPresentationEditorEmbedExt,
+            WhiteLabelLogoType.PdfEditor => dark ? DarkLogoPdfEditorExt : LogoPdfEditorExt,
+            WhiteLabelLogoType.PdfEditorEmbed => dark ? DarkLogoPdfEditorEmbedExt : LogoPdfEditorExt,
+            WhiteLabelLogoType.DiagramEditor => dark ? DarkLogoDiagramEditorExt : LogoDiagramEditorExt,
+            WhiteLabelLogoType.DiagramEditorEmbed => dark ? DarkLogoDiagramEditorEmbedExt : LogoDiagramEditorEmbedExt,
+            _ => ""
+        };
+    }
+
+    internal void SetExt(WhiteLabelLogoType type, string fileExt, bool dark)
+    {
+        switch (type)
+        {
+            case WhiteLabelLogoType.LightSmall:
+                if (dark)
+                {
+                    DarkLogoLightSmallExt = fileExt;
+                }
+                else
+                {
+                    LogoLightSmallExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.LoginPage:
+                if (dark)
+                {
+                    DarkLogoDarkExt = fileExt;
+                }
+                else
+                {
+                    LogoDarkExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.Favicon:
+                if (dark)
+                {
+                    DarkLogoFaviconExt = fileExt;
+                }
+                else
+                {
+                    LogoFaviconExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.DocsEditor:
+                if (dark)
+                {
+                    DarkLogoDocsEditorExt = fileExt;
+                }
+                else
+                {
+                    LogoDocsEditorExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.DocsEditorEmbed:
+                if (dark)
+                {
+                    DarkLogoDocsEditorEmbedExt = fileExt;
+                }
+                else
+                {
+                    LogoDocsEditorEmbedExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.LeftMenu:
+                if (dark)
+                {
+                    DarkLogoLeftMenuExt = fileExt;
+                }
+                else
+                {
+                    LogoLeftMenuExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.AboutPage:
+                if (dark)
+                {
+                    DarkLogoAboutPageExt = fileExt;
+                }
+                else
+                {
+                    LogoAboutPageExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.SpreadsheetEditor:
+                if (dark)
+                {
+                    DarkLogoSpreadsheetEditorExt = fileExt;
+                }
+                else
+                {
+                    LogoSpreadsheetEditorExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.SpreadsheetEditorEmbed:
+                if (dark)
+                {
+                    DarkLogoSpreadsheetEditorEmbedExt = fileExt;
+                }
+                else
+                {
+                    LogoSpreadsheetEditorEmbedExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.PresentationEditor:
+                if (dark)
+                {
+                    DarkLogoPresentationEditorExt = fileExt;
+                }
+                else
+                {
+                    LogoPresentationEditorExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.PresentationEditorEmbed:
+                if (dark)
+                {
+                    DarkLogoPresentationEditorEmbedExt = fileExt;
+                }
+                else
+                {
+                    LogoPresentationEditorEmbedExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.PdfEditor:
+                if (dark)
+                {
+                    DarkLogoPdfEditorExt = fileExt;
+                }
+                else
+                {
+                    LogoPdfEditorExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.PdfEditorEmbed:
+                if (dark)
+                {
+                    DarkLogoPdfEditorEmbedExt = fileExt;
+                }
+                else
+                {
+                    LogoPdfEditorEmbedExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.DiagramEditor:
+                if (dark)
+                {
+                    DarkLogoDiagramEditorExt = fileExt;
+                }
+                else
+                {
+                    LogoDiagramEditorExt = fileExt;
+                }
+                break;
+            case WhiteLabelLogoType.DiagramEditorEmbed:
+                if (dark)
+                {
+                    DarkLogoDiagramEditorEmbedExt = fileExt;
+                }
+                else
+                {
+                    LogoDiagramEditorEmbedExt = fileExt;
+                }
+                break;
+        }
+    }
+
+    #endregion
+}
+
+[Scope]
+public class TenantWhiteLabelSettingsHelper(
+    WebImageSupplier webImageSupplier,
+    UserPhotoManager userPhotoManager,
+    StorageFactory storageFactory,
+    TenantManager tenantManager,
+    AuthContext authContext,
+    UserManager userManager,
+    SettingsManager settingsManager,
+    IConfiguration configuration,
+    ILogger<TenantWhiteLabelSettingsHelper> logger)
+{
+    private const string ModuleName = "whitelabel";
+
+    #region Restore default
+
+    public async Task RestoreDefaultLogos(TenantWhiteLabelSettings tenantWhiteLabelSettings, TenantLogoManager tenantLogoManager, int tenantId, IDataStore storage = null)
+    {
+        tenantWhiteLabelSettings.LogoLightSmallExt = null;
+        tenantWhiteLabelSettings.DarkLogoLightSmallExt = null;
+
+        tenantWhiteLabelSettings.LogoDarkExt = null;
+        tenantWhiteLabelSettings.DarkLogoDarkExt = null;
+
+        tenantWhiteLabelSettings.LogoFaviconExt = null;
+        tenantWhiteLabelSettings.DarkLogoFaviconExt = null;
+
+        tenantWhiteLabelSettings.LogoDocsEditorExt = null;
+        tenantWhiteLabelSettings.DarkLogoDocsEditorExt = null;
+
+        tenantWhiteLabelSettings.LogoDocsEditorEmbedExt = null;
+        tenantWhiteLabelSettings.DarkLogoDocsEditorEmbedExt = null;
+
+        tenantWhiteLabelSettings.LogoLeftMenuExt = null;
+        tenantWhiteLabelSettings.DarkLogoLeftMenuExt = null;
+
+        tenantWhiteLabelSettings.LogoAboutPageExt = null;
+        tenantWhiteLabelSettings.DarkLogoAboutPageExt = null;
+
+        tenantWhiteLabelSettings.IsDefaultLogoLightSmall = true;
+        tenantWhiteLabelSettings.IsDefaultLogoDark = true;
+        tenantWhiteLabelSettings.IsDefaultLogoFavicon = true;
+        tenantWhiteLabelSettings.IsDefaultLogoDocsEditor = true;
+        tenantWhiteLabelSettings.IsDefaultLogoDocsEditorEmbed = true;
+        tenantWhiteLabelSettings.IsDefaultLogoLeftMenu = true;
+        tenantWhiteLabelSettings.IsDefaultLogoAboutPage = true;
+
+        var store = storage ?? await storageFactory.GetStorageAsync(tenantId, ModuleName);
+
+        try
+        {
+            await store.DeleteFilesAsync("", "*", false);
+        }
+        catch (Exception e)
+        {
+            logger.ErrorRestoreDefault(e);
+        }
+
+        await settingsManager.SaveAsync(tenantWhiteLabelSettings, tenantId);
+
+        await tenantLogoManager.RemoveMailLogoDataFromCacheAsync();
+    }
+
+    public async Task RestoreDefaultLogoText(TenantWhiteLabelSettings tenantWhiteLabelSettings, int tenantId)
+    {
+        tenantWhiteLabelSettings.SetLogoText(null);
+
+        await settingsManager.SaveAsync(tenantWhiteLabelSettings, tenantId);
+    }
+
+    #endregion
+
+    #region Set logo
+
+    private async Task SetLogoAsync(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, string logoFileExt, byte[] data, bool dark, IDataStore storage = null)
+    {
+        var store = storage ?? await storageFactory.GetStorageAsync(tenantManager.GetCurrentTenantId(), ModuleName);
+
+        #region delete from storage if already exists
+
+        var isAlreadyHaveBeenChanged = !tenantWhiteLabelSettings.GetIsDefault(type);
+
+        if (isAlreadyHaveBeenChanged)
+        {
+            try
+            {
+                await DeleteLogoFromStore(tenantWhiteLabelSettings, store, type, dark);
+            }
+            catch (Exception e)
+            {
+                logger.ErrorSetLogo(e);
+            }
+        }
+        #endregion
+
+        using var memory = new MemoryStream(data);
+        var logoFileName = BuildLogoFileName(type, logoFileExt, dark);
+
+        memory.Seek(0, SeekOrigin.Begin);
+        await store.SaveAsync(logoFileName, memory);
+    }
+
+    public async Task SetLogo(TenantWhiteLabelSettings tenantWhiteLabelSettings, IWhiteLabelLogoConverter logoConverter,
+        Dictionary<int, KeyValuePair<string, string>> logo, IDataStore storage = null)
+    {
+        foreach (var currentLogo in logo)
+        {
+            var currentLogoType = (WhiteLabelLogoType)currentLogo.Key;
+
+            var (lightData, extLight) = await GetLogoData(currentLogo.Value.Key);
+
+            var (darkData, extDark) = await GetLogoData(currentLogo.Value.Value);
+
+            if (lightData == null && darkData == null)
+            {
+                return;
+            }
+
+            if (lightData != null)
+            {
+                await SetLogoAsync(tenantWhiteLabelSettings, currentLogoType, extLight, lightData, false, storage);
+                tenantWhiteLabelSettings.SetExt(currentLogoType, extLight, false);
+                if (currentLogoType == WhiteLabelLogoType.LoginPage)
+                {
+                    var (notificationData, extNotification) = logoConverter.GetNotificationLogoData(lightData, extLight, tenantWhiteLabelSettings);
+
+                    if (notificationData != null)
+                    {
+                        await SetLogoAsync(tenantWhiteLabelSettings, WhiteLabelLogoType.Notification, extNotification, notificationData, false, storage);
+                    }
+                }
+            }
+
+            if (darkData != null && CanBeDark(currentLogoType))
+            {
+                await SetLogoAsync(tenantWhiteLabelSettings, currentLogoType, extDark, darkData, true, storage);
+                tenantWhiteLabelSettings.SetExt(currentLogoType, extDark, true);
+            }
+
+            tenantWhiteLabelSettings.SetIsDefault(currentLogoType, false);
+        }
+    }
+
+    private async Task<(byte[], string)> GetLogoData(string logo)
+    {
+        var supportedFormats = new[]
+        {
+            new {
+                    mime = "image/jpeg",
+                    ext = "jpg"
+                },
+            new {
+                    mime = "image/png",
+                    ext = "png"
+                },
+            new {
+                    mime = "image/svg+xml",
+                    ext = "svg"
+                }
+        };
+
+        if (!string.IsNullOrEmpty(logo))
+        {
+            byte[] data;
+            var format = supportedFormats.FirstOrDefault(r => logo.StartsWith($"data:{r.mime};base64,"));
+            string ext;
+            if (format == null)
+            {
+                var fileName = Path.GetFileName(logo);
+                ext = fileName.Split('.').Last();
+                data = await userPhotoManager.GetTempPhotoData(fileName);
+                try
+                {
+                    await userPhotoManager.RemoveTempPhotoAsync(fileName);
+                }
+                catch (Exception ex)
+                {
+                    logger.ErrorSetLogo(ex);
+                }
+            }
+            else
+            {
+                ext = format.ext;
+                var xB64 = logo[$"data:{format.mime};base64,".Length..]; // Get the Base64 string
+                data = Convert.FromBase64String(xB64); // Convert the Base64 string to binary data
+            }
+
+            return (data, ext);
+        }
+
+        return (null, null);
+    }
+
+    public async Task SetLogoFromStream(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, string fileExt, Stream fileStream, bool dark, IDataStore storage = null)
+    {
+        var data = GetData(fileStream);
+
+        var canSet = true;
+        if (dark)
+        {
+            canSet = CanBeDark(type);
+        }
+        if (data != null && canSet)
+        {
+            await SetLogoAsync(tenantWhiteLabelSettings, type, fileExt, data, dark, storage);
+            tenantWhiteLabelSettings.SetExt(type, fileExt, dark);
+        }
+
+        tenantWhiteLabelSettings.SetIsDefault(type, false);
+    }
+
+    private byte[] GetData(Stream stream)
+    {
+        if (stream != null)
+        {
+            using var memoryStream = new MemoryStream();
+            stream.CopyTo(memoryStream);
+            return memoryStream.ToArray();
+        }
+        return [];
+    }
+
+    #endregion
+
+    #region Get logo path
+
+    public async Task<string> GetAbsoluteLogoPathAsync(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, bool dark = false, string culture = null)
+    {
+        if (tenantWhiteLabelSettings.GetIsDefault(type))
+        {
+            return await GetAbsoluteDefaultLogoPathAsync(type, dark, culture);
+        }
+
+        return await GetAbsoluteStorageLogoPath(tenantWhiteLabelSettings, type, dark, culture);
+    }
+
+    private async Task<string> GetAbsoluteStorageLogoPath(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, bool dark, string culture = null)
+    {
+        var store = await storageFactory.GetStorageAsync(tenantManager.GetCurrentTenantId(), ModuleName);
+        var fileName = BuildLogoFileName(type, tenantWhiteLabelSettings.GetExt(type, dark), dark);
+
+        if (await store.IsFileAsync(fileName))
+        {
+            return await store.GetUrlWithHashAsync(string.Empty, fileName);
+        }
+        return await GetAbsoluteDefaultLogoPathAsync(type, dark, culture);
+    }
+
+    public async Task<string> GetAbsoluteDefaultLogoPathAsync(WhiteLabelLogoType type, bool dark, string culture = null)
+    {
+        var partnerLogoPath = await GetPartnerStorageLogoPathAsync(type, dark);
+        if (!string.IsNullOrEmpty(partnerLogoPath))
+        {
+            return partnerLogoPath;
+        }
+
+        var ext = type switch
+        {
+            WhiteLabelLogoType.Favicon => "ico",
+            WhiteLabelLogoType.Notification => "png",
+            _ => "svg"
+        };
+
+        var regionalPath = await GetCustomRegionalPath(culture);
+
+        var path = type switch
+        {
+            WhiteLabelLogoType.Notification => "notifications/",
+            _ => $"logo/{regionalPath}"
+        };
+
+        var fileName = BuildLogoFileName(type, ext, dark);
+
+        var version = configuration["version:number"];
+
+        var hash = string.IsNullOrEmpty(version) ? string.Empty : $"?{Data.Storage.Constants.QueryHash}={version}";
+
+        return webImageSupplier.GetAbsoluteWebPath($"{path}{fileName}{hash}");
+    }
+
+    private async Task<string> GetPartnerStorageLogoPathAsync(WhiteLabelLogoType type, bool dark)
+    {
+        var partnerSettings = await settingsManager.LoadForDefaultTenantAsync<TenantWhiteLabelSettings>();
+
+        if (partnerSettings.GetIsDefault(type))
+        {
+            return null;
+        }
+
+        var partnerStorage = await storageFactory.GetStorageAsync(Tenant.DefaultTenant, "static_partnerdata");
+
+        if (partnerStorage == null)
+        {
+            return null;
+        }
+
+        var logoPath = BuildLogoFileName(type, partnerSettings.GetExt(type, dark), dark);
+
+        return await partnerStorage.IsFileAsync(logoPath) ? await partnerStorage.GetUrlWithHashAsync(string.Empty, logoPath) : null;
+    }
+
+    private async Task<string> GetCustomRegionalPath(string culture)
+    {
+        var customCultures = configuration.GetSection("web:logo:custom-cultures").Get<string[]>() ?? [];
+
+        if (customCultures.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (string.IsNullOrEmpty(culture) && authContext.IsAuthenticated)
+        {
+            culture = (await userManager.GetUsersAsync(authContext.CurrentAccount.ID)).CultureName;
+        }
+
+        if (string.IsNullOrEmpty(culture))
+        {
+            culture = tenantManager.GetCurrentTenant().Language;
+        }
+
+        return customCultures.Contains(culture, StringComparer.InvariantCultureIgnoreCase) ? $"{culture.ToLower()}/" : string.Empty;
+    }
+
+    #endregion
+
+    #region Get Whitelabel Logo Stream
+
+    /// <summary>
+    /// Get logo stream or null in case of default whitelabel
+    /// </summary>
+    public async Task<Stream> GetWhitelabelLogoData(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, bool dark = false)
+    {
+        if (tenantWhiteLabelSettings.GetIsDefault(type))
+        {
+            return await GetPartnerStorageLogoData(type, dark);
+        }
+
+        return await GetStorageLogoData(tenantWhiteLabelSettings, type, dark);
+    }
+
+    private async Task<Stream> GetStorageLogoData(TenantWhiteLabelSettings tenantWhiteLabelSettings, WhiteLabelLogoType type, bool dark)
+    {
+        var storage = await storageFactory.GetStorageAsync(tenantManager.GetCurrentTenantId(), ModuleName);
+
+        if (storage == null)
+        {
+            return null;
+        }
+
+        var fileName = BuildLogoFileName(type, tenantWhiteLabelSettings.GetExt(type, dark), dark);
+
+        return await storage.IsFileAsync(fileName) ? await storage.GetReadStreamAsync(fileName) : null;
+    }
+
+    private async Task<Stream> GetPartnerStorageLogoData(WhiteLabelLogoType type, bool dark)
+    {
+        var partnerSettings = await settingsManager.LoadForDefaultTenantAsync<TenantWhiteLabelSettings>();
+
+        if (partnerSettings.GetIsDefault(type))
+        {
+            return null;
+        }
+
+        var partnerStorage = await storageFactory.GetStorageAsync(Tenant.DefaultTenant, "static_partnerdata");
+
+        if (partnerStorage == null)
+        {
+            return null;
+        }
+
+        var fileName = BuildLogoFileName(type, partnerSettings.GetExt(type, dark), dark);
+
+        return await partnerStorage.IsFileAsync(fileName) ? await partnerStorage.GetReadStreamAsync(fileName) : null;
+    }
+
+    #endregion
+
+    private static string BuildLogoFileName(WhiteLabelLogoType type, string fileExt, bool dark)
+    {
+        if (CanBeDark(type))
+        {
+            return $"{(dark ? "dark_" : "")}{type.ToStringFast().ToLowerInvariant()}.{fileExt}";
+        }
+
+        return $"{type.ToStringLowerFast()}.{fileExt}";
+    }
+
+    #region Delete from Store
+
+    private async Task DeleteLogoFromStore(TenantWhiteLabelSettings tenantWhiteLabelSettings, IDataStore store, WhiteLabelLogoType type, bool dark)
+    {
+        await DeleteLogoFromStoreByGeneral(tenantWhiteLabelSettings, store, type, dark);
+    }
+
+    private async Task DeleteLogoFromStoreByGeneral(TenantWhiteLabelSettings tenantWhiteLabelSettings, IDataStore store, WhiteLabelLogoType type, bool dark)
+    {
+        var fileExt = tenantWhiteLabelSettings.GetExt(type, dark);
+        var logo = BuildLogoFileName(type, fileExt, dark);
+        if (await store.IsFileAsync(logo))
+        {
+            await store.DeleteAsync(logo);
+        }
+    }
+
+    #endregion
+
+    private static bool CanBeDark(WhiteLabelLogoType type)
+    {
+        return type switch
+        {
+            WhiteLabelLogoType.Favicon => false,
+            WhiteLabelLogoType.DocsEditor => false,
+            WhiteLabelLogoType.DocsEditorEmbed => false,
+            WhiteLabelLogoType.SpreadsheetEditor => false,
+            WhiteLabelLogoType.SpreadsheetEditorEmbed => false,
+            WhiteLabelLogoType.PresentationEditor => false,
+            WhiteLabelLogoType.PresentationEditorEmbed => false,
+            WhiteLabelLogoType.PdfEditor => false,
+            WhiteLabelLogoType.PdfEditorEmbed => false,
+            WhiteLabelLogoType.DiagramEditor => false,
+            WhiteLabelLogoType.DiagramEditorEmbed => false,
+            _ => true
+        };
+    }
+}

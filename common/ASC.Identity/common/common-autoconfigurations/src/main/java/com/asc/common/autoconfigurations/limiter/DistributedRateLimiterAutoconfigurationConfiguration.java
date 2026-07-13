@@ -1,0 +1,148 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.common.autoconfigurations.limiter;
+
+import io.github.bucket4j.Bandwidth;
+import io.github.bucket4j.BucketConfiguration;
+import io.github.bucket4j.Refill;
+import io.github.bucket4j.distributed.ExpirationAfterWriteStrategy;
+import io.github.bucket4j.redis.lettuce.cas.LettuceBasedProxyManager;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.codec.ByteArrayCodec;
+import io.lettuce.core.codec.RedisCodec;
+import io.lettuce.core.codec.StringCodec;
+import java.time.Duration;
+import java.util.List;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import lombok.RequiredArgsConstructor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+
+/**
+ * Configuration class for setting up distributed rate limiting using Bucket4j and Redis. This
+ * configuration is activated when the property `bucket4j.enabled` is set to `true`. It provides
+ * beans for managing the Redis connection, Bucket4j proxy manager, and bucket configurations.
+ *
+ * <p>This configuration is only loaded when Redis classes are available on the classpath.
+ */
+@Configuration
+@RequiredArgsConstructor
+@ConditionalOnClass(RedisClient.class)
+@EnableConfigurationProperties(Bucket4jConfiguration.class)
+@ConditionalOnProperty(prefix = "bucket4j", name = "enabled", havingValue = "true")
+public class DistributedRateLimiterAutoconfigurationConfiguration {
+  private final Bucket4jConfiguration bucket4jConfiguration;
+
+  /**
+   * Creates and configures a Redis client based on the application properties. The Redis client is
+   * used for establishing connections to the Redis server for distributed rate limiting.
+   *
+   * @return The configured {@link RedisClient}.
+   */
+  @Bean
+  public RedisClient redisClient() {
+    return RedisClient.create(
+        RedisURI.builder()
+            .withHost(bucket4jConfiguration.getRedis().getHost())
+            .withPort(bucket4jConfiguration.getRedis().getPort())
+            .withDatabase(bucket4jConfiguration.getRedis().getDatabase())
+            .withSsl(bucket4jConfiguration.getRedis().isSsl())
+            .withAuthentication(
+                bucket4jConfiguration.getRedis().getUsername(),
+                bucket4jConfiguration.getRedis().getPassword())
+            .build());
+  }
+
+  /**
+   * Creates and configures a Lettuce-based proxy manager for managing distributed rate limits. The
+   * proxy manager uses Redis to persist rate-limiting data and supports expiration strategies.
+   *
+   * @param redisClient The Redis client used to establish a connection to the Redis server.
+   * @return The configured {@link LettuceBasedProxyManager} instance for distributed rate limiting.
+   */
+  @Bean
+  public LettuceBasedProxyManager<String> lettuceBasedProxyManager(RedisClient redisClient) {
+    var redisConnection =
+        redisClient.connect(RedisCodec.of(StringCodec.UTF8, ByteArrayCodec.INSTANCE));
+    return LettuceBasedProxyManager.builderFor(redisConnection)
+        .withExpirationStrategy(
+            ExpirationAfterWriteStrategy.basedOnTimeForRefillingBucketUpToMax(
+                Duration.ofMinutes(1L)))
+        .build();
+  }
+
+  /**
+   * Creates a supplier for Bucket4j configurations based on the application-defined rate limits.
+   * This supplier provides Bucket configurations for each HTTP method based on the defined rate
+   * limit properties.
+   *
+   * @return A {@link Function} mapping {@link HttpMethod} to a {@link Supplier} of {@link
+   *     BucketConfiguration}.
+   * @throws Exception If no configuration for the GET method is found, an exception is thrown.
+   */
+  @Bean
+  public Function<HttpMethod, Supplier<BucketConfiguration>> bucketConfiguration()
+      throws Exception {
+    List<Bucket4jConfiguration.RateLimitProperties.ClientRateLimitProperties> rateLimitProperties =
+        bucket4jConfiguration.getRateLimits().getLimits();
+    Bucket4jConfiguration.RateLimitProperties.ClientRateLimitProperties getLimits =
+        bucket4jConfiguration.getRateLimits().getLimits().stream()
+            .filter(props -> props.getMethod().equalsIgnoreCase(HttpMethod.GET.name()))
+            .findFirst()
+            .orElseThrow(() -> new Exception("Could not initialize rate-limiter configuration"));
+    return (HttpMethod method) -> {
+      var config =
+          rateLimitProperties.stream()
+              .filter(props -> props.getMethod().equalsIgnoreCase(method.name()))
+              .findFirst()
+              .orElse(getLimits);
+      return () ->
+          BucketConfiguration.builder()
+              .addLimit(
+                  Bandwidth.classic(
+                      config.getCapacity(),
+                      Refill.greedy(
+                          config.getRefill().getTokens(),
+                          Duration.of(
+                              config.getRefill().getPeriod(), config.getRefill().getTimeUnit()))))
+              .build();
+    };
+  }
+}

@@ -1,0 +1,385 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using ASC.Files.Core.Mapping;
+
+namespace ASC.Files.Core;
+
+/// <summary>
+/// The folder type.
+/// </summary>
+public enum FolderType
+{
+    [Description("Default")]
+    DEFAULT = 0,
+
+    [Description("Coomon")]
+    COMMON = 1,
+
+    [Description("Bunch")]
+    BUNCH = 2,
+
+    [Description("Trash")]
+    TRASH = 3,
+
+    [Description("User")]
+    USER = 5,
+
+    [Description("Share")]
+    SHARE = 6,
+
+    [Description("Projects")]
+    Projects = 8,
+
+    [Description("Favourites")]
+    Favorites = 10,
+
+    [Description("Recent")]
+    Recent = 11,
+
+    [Description("Templates")]
+    Templates = 12,
+
+    [Description("Privacy")]
+    Privacy = 13,
+
+    [Description("Virtual rooms")]
+    VirtualRooms = 14,
+
+    [Description("Filling forms room")]
+    FillingFormsRoom = 15,
+
+    [Description("Editing room")]
+    EditingRoom = 16,
+
+    [Description("Custom room")]
+    CustomRoom = 19,
+
+    [Description("Archive")]
+    Archive = 20,
+
+    [Description("Thirdparty backup")]
+    ThirdpartyBackup = 21,
+
+    [Description("Public room")]
+    PublicRoom = 22,
+
+    [Description("Ready form folder")]
+    ReadyFormFolder = 25,
+
+    [Description("In process form folder")]
+    InProcessFormFolder = 26,
+
+    [Description("Form filling folder done")]
+    FormFillingFolderDone = 27,
+
+    [Description("Form filling folder in progress")]
+    FormFillingFolderInProgress = 28,
+
+    [Description("Virtual Data Room")]
+    VirtualDataRoom = 29,
+
+    [Description("Room templates folder")]
+    RoomTemplates = 30,
+
+    [Description("AI Room")]
+    AiRoom = 31,
+
+    [Description("Knowledge")]
+    Knowledge = 32,
+
+    [Description("Result storage")]
+    ResultStorage = 33,
+
+    [Description("AI Agents")]
+    AiAgents = 34,
+
+    [Description("Default Templates")]
+    DefaultTemplates = 35
+}
+
+/// <summary>
+/// The folder parameters.
+/// </summary>
+public interface IFolder
+{
+    /// <summary>
+    /// The folder type.
+    /// </summary>
+    FolderType FolderType { get; set; }
+
+    /// <summary>
+    /// The root folder type of the folder.
+    /// </summary>
+    FolderType RootFolderType { get; set; }
+
+    /// <summary>
+    /// The ID of the user who created the root folder of the folder.
+    /// </summary>
+    Guid RootCreateBy { get; set; }
+
+    /// <summary>
+    /// The number of files in the folder.
+    /// </summary>
+    int FilesCount { get; set; }
+
+    /// <summary>
+    /// The number of folders in the folder.
+    /// </summary>
+    int FoldersCount { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder can be shared or not.
+    /// </summary>
+    bool Shareable { get; set; }
+
+    /// <summary>
+    /// The number of files in the folder that the user has not seen yet.
+    /// </summary>
+    int NewForMe { get; set; }
+
+    /// <summary>
+    /// The URL to the folder.
+    /// </summary>
+    string FolderUrl { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder is pinned to the top of the list or not.
+    /// </summary>
+    bool Pinned { get; set; }
+
+    /// <summary>
+    /// The collection of folder tags.
+    /// </summary>
+    IEnumerable<Tag> Tags { get; set; }
+
+    /// <summary>
+    /// Indicates whether the folder represents a room.
+    /// </summary>
+    bool IsRoom { get; }
+
+    /// <summary>
+    /// Indicates whether the folder represents an AI agent.
+    /// </summary>
+    bool IsAgent { get; }
+}
+
+/// <summary>
+/// The folder parameters.
+/// </summary>
+[DebuggerDisplay("{Title} ({Id})")]
+[Transient(GenericArguments = [typeof(int)])]
+[Transient(GenericArguments = [typeof(string)])]
+public class Folder<T> : FileEntry<T>, IFolder
+{
+    /// <summary>
+    /// The folder type.
+    /// </summary>
+    public FolderType FolderType { get; set; }
+
+    /// <summary>
+    /// The number of files in the folder.
+    /// </summary>
+    public int FilesCount { get; set; }
+
+    /// <summary>
+    /// The number of folders in the folder.
+    /// </summary>
+    public int FoldersCount { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder can be shared or not.
+    /// </summary>
+    public bool Shareable { get; set; }
+
+    /// <summary>
+    /// The number of files in the folder that the user has not seen yet.
+    /// </summary>
+    public int NewForMe { get; set; }
+
+    /// <summary>
+    /// The URL to the folder.
+    /// </summary>
+    public string FolderUrl { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder is pinned to the top of the list or not.
+    /// </summary>
+    public bool Pinned { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder is private or not.
+    /// </summary>
+    public bool SettingsPrivate { get; set; }
+
+    /// <summary>
+    /// Specifies if an icon will be displayed on the folder cover or not.
+    /// </summary>
+    public bool SettingsHasLogo { get; set; }
+
+    /// <summary>
+    /// The color in the HEX format for the folder cover.
+    /// </summary>
+    public string SettingsColor { get; set; }
+
+    /// <summary>
+    /// The ID of the folder cover icon.
+    /// </summary>
+    public string SettingsCover { get; set; }
+
+    /// <summary>
+    /// The watermark settings.
+    /// </summary>
+    public WatermarkSettings SettingsWatermark { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder content is indexed or not.
+    /// </summary>
+    public bool SettingsIndexing { get; set; }
+
+    /// <summary>
+    /// The folder quota.
+    /// </summary>
+    public long SettingsQuota { get; set; }
+
+    /// <summary>
+    /// The file lifetime in this folder.
+    /// </summary>
+    public RoomDataLifetime SettingsLifetime { get; set; }
+    
+    /// <summary>
+    /// The chat provider ID configured for the folder.
+    /// </summary>
+    public int SettingsChatProviderId { get; set; }
+
+    /// <summary>
+    /// The chat parameters configured for the folder.
+    /// </summary>
+    public ChatParameters SettingsChatParameters { get; set; }
+
+    /// <summary>
+    /// Specifies if the files can be downloaded from this folder or not.
+    /// </summary>
+    public bool SettingsDenyDownload { get; set; }
+
+    /// <summary>
+    /// Specifies if form data should be sent to external database.
+    /// </summary>
+    public bool SettingsSendFormToExternalDB { get; set; }
+
+    /// <summary>
+    /// Specifies if form data should be saved as XLSX file.
+    /// </summary>
+    public bool SettingsSaveFormAsXLSX { get; set; }
+
+    /// <summary>
+    /// The folder used space.
+    /// </summary>
+    public long Counter { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder has files that the user has not seen yet.
+    /// </summary>
+    public override bool IsNew
+    {
+        get => Convert.ToBoolean(NewForMe);
+        set => NewForMe = Convert.ToInt32(value);
+    }
+
+    /// <summary>
+    /// Specifies if the folder is favorite or not.
+    /// </summary>
+    public bool? IsFavorite { get; set; }
+
+    /// <summary>
+    /// Specifies if the folder provider is mapped or not.
+    /// </summary>
+    public bool ProviderMapped { get; set; }
+
+    public Folder(IServiceProvider serviceProvider) : base(serviceProvider)
+    {
+        Title = string.Empty;
+        FileEntryType = FileEntryType.Folder;
+    }
+
+    /// <summary>
+    /// The unique forlder ID.
+    /// </summary>
+    public override string UniqID => $"folder_{Id}";
+
+    /// <summary>
+    /// Specifies if the folder is root or not.
+    /// </summary>
+    public bool IsRoot => FolderType == RootFolderType;
+
+    public bool IsRoom => this.FolderType.IsRoom();
+
+    public bool IsAgent => this.FolderType.IsAgent();
+}
+
+[Scope]
+[Mapper(RequiredMappingStrategy = RequiredMappingStrategy.None, PropertyNameMappingStrategy = PropertyNameMappingStrategy.CaseInsensitive)]
+public partial class FolderMapper(IServiceProvider serviceProvider, TenantDateTimeConverter tenantDateTimeConverter, FilesMappingAction filesMappingAction)
+{
+    private partial Folder<int> Map(DbFolderQuery source);
+
+    [MapperIgnoreSource(nameof(DbFolder.Settings))]
+    private partial void ApplyChanges(DbFolder source, Folder<int> target);
+
+    [UserMapping(Default = true)]
+    public Folder<int> MapDbFolderQueryToDbFolderInternal(DbFolderQuery dbFolderQuery)
+    {
+        if (dbFolderQuery == null)
+        {
+            return null;
+        }
+
+        var result = Map(dbFolderQuery);
+        ApplyChanges(dbFolderQuery.Folder, result);
+        result.CreateOn = tenantDateTimeConverter.Convert(dbFolderQuery.Folder.CreateOn);
+        result.ModifiedOn = tenantDateTimeConverter.Convert(dbFolderQuery.Folder.ModifiedOn);
+        filesMappingAction.Process(result);
+
+        if (dbFolderQuery.UserShared != null)
+        {
+            result.Shared = dbFolderQuery.UserShared.Any(r => r.SubjectType is SubjectType.ExternalLink or SubjectType.PrimaryExternalLink);
+            result.SharedForUser = dbFolderQuery.UserShared.Any(r => r.SubjectType is SubjectType.Group or SubjectType.User);
+            result.SharedExternal = dbFolderQuery.UserShared.Any(r => (r.SubjectType is SubjectType.ExternalLink or SubjectType.PrimaryExternalLink) && r.Internal is false);
+        }
+
+        return result;
+    }
+
+    [ObjectFactory]
+    private Folder<int> CreateFolder() => serviceProvider.GetService<Folder<int>>();
+}

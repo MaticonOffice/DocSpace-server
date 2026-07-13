@@ -1,0 +1,153 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+//
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+//
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+//
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+//
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+//
+// No trademark rights are granted under this License.
+//
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+//
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.asc.authorization.application.security.oauth.service;
+
+import com.asc.authorization.application.exception.client.RegisteredClientPermissionException;
+import com.asc.authorization.application.mapper.ClientMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.stereotype.Repository;
+
+/**
+ * Service for managing registered OAuth2 clients.
+ *
+ * <p>This service acts as a repository for read-only operations on registered clients. It interacts
+ * with a gRPC service to fetch client information and provides methods for retrieving clients by ID
+ * or client ID. It also validates client accessibility based on specific conditions.
+ */
+@Slf4j
+@Repository
+@RequiredArgsConstructor
+public class RegisteredClientService
+    implements RegisteredClientRepository, RegisteredClientAccessibilityService {
+  private final GrpcRegisteredClientService grpcRegisteredClientService;
+  private final ClientMapper clientMapper;
+
+  /**
+   * Saves a registered client.
+   *
+   * <p>This operation is not supported because the service is read-only.
+   *
+   * @param registeredClient the {@link RegisteredClient} to save.
+   */
+  public void save(RegisteredClient registeredClient) {
+    MDC.put("client_id", registeredClient.getClientId());
+    MDC.put("client_name", registeredClient.getClientName());
+    log.error("ASC registered client repository supports only read operations");
+    MDC.clear();
+  }
+
+  /**
+   * Finds a registered client by its ID.
+   *
+   * <p>The client is retrieved from the gRPC service. If the client is disabled, a {@link
+   * RegisteredClientPermissionException} is thrown. If the client is not found, null is returned.
+   *
+   * @param id the ID of the registered client.
+   * @return the {@link RegisteredClient}, or {@code null} if not found.
+   */
+  public RegisteredClient findById(String id) {
+    try {
+      MDC.put("client_id", id);
+      log.info("Trying to find registered client by id");
+
+      var client = grpcRegisteredClientService.getClient(id);
+
+      if (!client.getEnabled())
+        throw new RegisteredClientPermissionException(
+            String.format("Client with id %s is disabled", id));
+
+      return clientMapper.toRegisteredClient(client);
+    } catch (Exception e) {
+      log.warn("Could not find registered client", e);
+      return null;
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Finds a registered client by its client ID.
+   *
+   * <p>This method delegates to {@link #findById(String)} to retrieve the client. If the client is
+   * not found, null is returned.
+   *
+   * @param clientId the client ID of the registered client.
+   * @return the {@link RegisteredClient}, or {@code null} if not found.
+   */
+  public RegisteredClient findByClientId(String clientId) {
+    try {
+      MDC.put("client_id", clientId);
+      log.info("Trying to get client by client id");
+
+      return findById(clientId);
+    } catch (Exception e) {
+      log.warn("Could not get client by client_id", e);
+      return null;
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /**
+   * Validates whether a registered client is accessible.
+   *
+   * <p>The client is considered accessible if it is public and enabled.
+   *
+   * @param clientId the client ID of the registered client.
+   * @return {@code true} if the client is accessible, {@code false} otherwise.
+   */
+  public boolean validateClientAccessibility(String clientId) {
+    try {
+      var client = grpcRegisteredClientService.getClient(clientId);
+      if (!client.getIsPublic()) {
+        log.warn("Client {} is not accessible", client.getClientId());
+        return false;
+      }
+
+      if (!client.getEnabled()) {
+        log.warn("Client {} is disabled", client.getClientId());
+        return false;
+      }
+
+      return true;
+    } catch (Exception e) {
+      log.warn("Registered client not found for client ID: {}", clientId);
+      return false;
+    }
+  }
+}

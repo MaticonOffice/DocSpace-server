@@ -1,0 +1,90 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.People.ApiModels.RequestDto;
+
+/// <summary>
+/// The thumbnail request.
+/// </summary>
+public class ThumbnailsRequest
+{
+    /// <summary>
+    /// The path to the temporary thumbnail file.
+    /// </summary>
+    /// <example>/tmp/photo_temp_123.jpg</example>
+    public string TmpFile { get; set; }
+
+    /// <summary>
+    /// The thumbnail horizontal coordinate.
+    /// </summary>
+    /// <example>100</example>
+    public int X { get; set; }
+
+    /// <summary>
+    /// The thumbnail vertical coordinate.
+    /// </summary>
+    /// <example>50</example>
+    public int Y { get; set; }
+
+    /// <summary>
+    /// The thumbnail width.
+    /// </summary>
+    /// <example>200</example>
+    public uint Width { get; set; }
+
+    /// <summary>
+    /// The thumbnail height.
+    /// </summary>
+    /// <example>200</example>
+    public uint Height { get; set; }
+}
+
+/// <summary>
+/// The thumbnail request parameters.
+/// </summary>
+public class ThumbnailsRequestDto
+{
+    /// <summary>
+    /// The user ID.
+    /// </summary>
+    /// <example>00000000-0000-0000-0000-000000000000</example>
+    [FromRoute(Name = "userid")]
+    public required string UserId { get; set; }
+
+    /// <summary>
+    /// The thumbnail request.
+    /// </summary>
+    /// <example>{"tmpFile":"/tmp/photo.jpg","x":0,"y":0,"width":200,"height":200}</example>
+    [FromBody]
+    public required ThumbnailsRequest Thumbnails { get; set; }
+}

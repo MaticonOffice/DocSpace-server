@@ -1,0 +1,289 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Core.Billing;
+
+public enum LicenseType
+{
+    Enterprise,
+    Developer
+}
+
+[Singleton]
+public class LicenseReaderConfig
+{
+    public readonly LicenseType LicenseType;
+    public readonly string LicensePath;
+    public readonly string LicensePathTemp;
+    public readonly string LicensePathBcp;
+
+    public LicenseReaderConfig(IConfiguration configuration)
+    {
+        LicensePath = configuration["license:file:path"] ?? "";
+        LicensePathTemp = LicensePath + ".tmp";
+        LicensePathBcp = LicensePath + ".bcp";
+
+        _ = Enum.TryParse(configuration["license:type"], true, out LicenseType);
+    }
+}
+
+public record LicenseValidationResult(bool IsValid, string ErrorMessage);
+
+[Scope]
+public class LicenseReader(
+    TenantManager tenantManager,
+    ITariffService tariffService,
+    CoreSettings coreSettings,
+    LicenseReaderConfig licenseReaderConfig,
+    ILogger<LicenseReader> logger)
+{
+    public readonly string LicensePath = licenseReaderConfig.LicensePath;
+    private readonly string _licensePathTemp = licenseReaderConfig.LicensePathTemp;
+    private readonly string _licensePathBcp = licenseReaderConfig.LicensePathBcp;
+    private readonly LicenseType _licenseType = licenseReaderConfig.LicenseType;
+
+    public const string CustomerIdKey = "CustomerId";
+
+    public async Task SetCustomerIdAsync(string value)
+    {
+        await coreSettings.SaveSettingAsync(CustomerIdKey, value);
+    }
+
+    private FileStream GetLicenseStream(bool temp = false)
+    {
+        var path = temp ? _licensePathTemp : LicensePath;
+        if (!File.Exists(path))
+        {
+            throw new BillingNotFoundException("License not found");
+        }
+
+        return File.OpenRead(path);
+    }
+
+    public async Task RejectLicenseAsync()
+    {
+        if (File.Exists(_licensePathTemp))
+        {
+            File.Delete(_licensePathTemp);
+        }
+
+        if (File.Exists(LicensePath))
+        {
+            File.Delete(LicensePath);
+        }
+
+        await tariffService.DeleteDefaultBillingInfoAsync();
+    }
+
+    public async Task RefreshLicenseAsync(Func<License, Task<LicenseValidationResult>> validateFunc)
+    {
+        if (string.IsNullOrEmpty(LicensePath))
+        {
+            throw new BillingNotFoundException("Empty license path");
+        }
+
+        var temp = File.Exists(_licensePathTemp);
+        var bcp = temp && File.Exists(LicensePath);
+
+        try
+        {
+            await using (var licenseStream = GetLicenseStream(temp))
+            using (var reader = new StreamReader(licenseStream))
+            {
+                var licenseJsonString = await reader.ReadToEndAsync();
+                var license = License.Parse(licenseJsonString);
+
+                if (bcp)
+                {
+                    File.Move(LicensePath, _licensePathBcp, true);
+                }
+
+                if (temp)
+                {
+                    await SaveLicenseAsync(licenseStream, LicensePath);
+                }
+
+                var validationResult = await validateFunc(license);
+                if (!validationResult.IsValid)
+                {
+                    throw new BillingNotConfiguredException($"License validation failed: {validationResult.ErrorMessage}");
+                }
+
+                await LicenseToDBAsync(license);
+            }
+
+            if (temp)
+            {
+                File.Delete(_licensePathTemp);
+            }
+
+            if (bcp)
+            {
+                File.Delete(_licensePathBcp);
+            }
+        }
+        catch (BillingException ex) when (ex is BillingNotConfiguredException or BillingLicenseTypeException)
+        {
+            if (bcp)
+            {
+                File.Move(_licensePathBcp, LicensePath, true);
+            }
+            else if (temp)
+            {
+                File.Delete(LicensePath);
+            }
+
+            LogError(ex);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogError(ex);
+            throw;
+        }
+    }
+
+    public async Task<DateTime> SaveLicenseTemp(Stream licenseStream)
+    {
+        if (string.IsNullOrEmpty(LicensePath))
+        {
+            throw new BillingNotFoundException("Empty license path");
+        }
+
+        try
+        {
+            using var reader = new StreamReader(licenseStream);
+            var licenseJsonString = await reader.ReadToEndAsync();
+            var license = License.Parse(licenseJsonString);
+
+            var dueDate = Validate(license);
+
+            await SaveLicenseAsync(licenseStream, _licensePathTemp);
+
+            return dueDate;
+        }
+        catch (Exception ex)
+        {
+            LogError(ex);
+
+            throw;
+        }
+    }
+
+    private static async Task SaveLicenseAsync(Stream licenseStream, string path)
+    {
+        ArgumentNullException.ThrowIfNull(licenseStream);
+
+        if (licenseStream.CanSeek)
+        {
+            licenseStream.Seek(0, SeekOrigin.Begin);
+        }
+
+        await using var fs = File.Open(path, FileMode.Create);
+
+        await licenseStream.CopyToAsync(fs);
+    }
+
+    private DateTime Validate(License license)
+    {
+        if (string.IsNullOrEmpty(license.CustomerId)
+            || string.IsNullOrEmpty(license.Signature))
+        {
+            throw new BillingNotConfiguredException("License file is not correct");
+        }
+
+        if (license.StartDate.Date > DateTime.UtcNow.Date)
+        {
+            throw new ArgumentOutOfRangeException(nameof(license.StartDate));
+        }
+
+        var invalidLicenseType = _licenseType == LicenseType.Enterprise ? license.Developer : !license.Developer;
+        if (invalidLicenseType)
+        {
+            throw new BillingLicenseTypeException("License type is not correct");
+        }
+
+        return license.DueDate.Date;
+    }
+
+    private async Task LicenseToDBAsync(License license)
+    {
+        Validate(license);
+
+        await SetCustomerIdAsync(license.CustomerId);
+
+        var defaultQuota = await tenantManager.GetTenantQuotaAsync(Tenant.DefaultTenant);
+
+        var quota = new TenantQuota(-1000)
+        {
+            Name = "license",
+            Trial = license.Trial,
+            Audit = true,
+            Ldap = true,
+            Sso = true,
+            ThirdParty = true,
+            Restore = true,
+            Oauth = true,
+            ContentSearch = true,
+            MaxFileSize = defaultQuota.MaxFileSize,
+            DocsEdition = true,
+            Branding = license.Branding,
+            Customization = license.Customization,
+            Lifetime = !license.Trial && !license.TimeLimited,
+            AutomationApi = license.AutomationApi,
+            Statistic = true
+        };
+
+        await tenantManager.SaveTenantQuotaAsync(quota);
+
+        var tariff = new Tariff
+        {
+            Quotas = [new Quota(quota.TenantId, 1)],
+            DueDate = license.DueDate
+        };
+
+        await tariffService.SetTariffAsync(Tenant.DefaultTenant, tariff, [quota]);
+    }
+
+    private void LogError(Exception error)
+    {
+        if (error is BillingNotFoundException)
+        {
+            logger.DebugLicenseNotFound(error.Message);
+        }
+        else
+        {
+            logger.ErrorWithException(error);
+        }
+    }
+}

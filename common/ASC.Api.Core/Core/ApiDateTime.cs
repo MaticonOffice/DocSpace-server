@@ -1,0 +1,408 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+using System.ComponentModel;
+
+namespace ASC.Api.Core;
+
+/// <summary>
+/// The API date and time parameters.
+/// </summary>
+[TypeConverter(typeof(ApiDateTimeTypeConverter))]
+[JsonConverter(typeof(ApiDateTimeConverter))]
+public sealed class ApiDateTime : IComparable<ApiDateTime>, IComparable
+{
+    /// <summary>
+    /// The time in UTC format.
+    /// </summary>
+    /// <example>2018-01-01T00:00:00.0000000Z</example>
+    public DateTime UtcTime { get; private set; }
+
+    /// <summary>
+    /// The time zone offset.
+    /// </summary>
+    /// <example>00:00:00</example>
+    public TimeSpan TimeZoneOffset { get; private set; }
+
+    internal static readonly string[] Formats =
+    [
+        "o",
+        "yyyy'-'MM'-'dd'T'HH'-'mm'-'ss'.'fffffffK",
+        "yyyy'-'MM'-'dd'T'HH'-'mm'-'ss'.'fffK",
+        "yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fffK",
+        "yyyy'-'MM'-'dd'T'HH'-'mm'-'ssK",
+        "yyyy'-'MM'-'dd'T'HH':'mm':'ssK",
+        "yyyy'-'MM'-'dd"
+    ];
+
+    private readonly TenantManager _tenantManager;
+
+    public ApiDateTime() : this(null, null) { }
+
+    public ApiDateTime(TenantManager tenantManager, DateTime? dateTime)
+        : this(tenantManager, dateTime, null) { }
+
+    public ApiDateTime(TenantManager tenantManager, DateTime? dateTime, TimeZoneInfo timeZone)
+    {
+        if (dateTime.HasValue && dateTime.Value > DateTime.MinValue && dateTime.Value < DateTime.MaxValue)
+        {
+            _tenantManager = tenantManager;
+            SetDate(dateTime.Value, timeZone);
+        }
+        else
+        {
+            UtcTime = DateTime.MinValue;
+            TimeZoneOffset = TimeSpan.Zero;
+        }
+    }
+
+    public ApiDateTime(DateTime utcTime, TimeSpan offset)
+    {
+        UtcTime = new DateTime(utcTime.Ticks, DateTimeKind.Utc);
+        TimeZoneOffset = offset;
+    }
+
+    public static ApiDateTime Parse(string data, TenantManager tenantManager)
+    {
+        return Parse(data, null, tenantManager);
+    }
+
+    public static ApiDateTime Parse(string data, TimeZoneInfo tz, TenantManager tenantManager)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(data);
+
+        var offsetPart = data.Substring(data.Length - 6, 6);
+        if (DateTime.TryParseExact(data, Formats, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var dateTime))
+        {
+            //Parse time   
+            var tzOffset = TimeSpan.Zero;
+            if (offsetPart.Contains(':') && TimeSpan.TryParse(offsetPart.TrimStart('+'), out tzOffset))
+            {
+                return new ApiDateTime(dateTime, tzOffset);
+            }
+
+            if (!data.EndsWith('Z'))
+            {
+                tz ??= GetTimeZoneInfo(tenantManager);
+
+                tzOffset = tz.GetUtcOffset(dateTime);
+                dateTime = dateTime.Subtract(tzOffset);
+            }
+
+            return new ApiDateTime(dateTime, tzOffset);
+        }
+
+        throw new ArgumentException("invalid date time format: " + data);
+    }
+
+
+    private void SetDate(DateTime value, TimeZoneInfo timeZone)
+    {
+        TimeZoneOffset = TimeSpan.Zero;
+        UtcTime = DateTime.MinValue;
+
+        timeZone ??= GetTimeZoneInfo(_tenantManager);
+
+        //Hack
+        if (timeZone.IsInvalidTime(new DateTime(value.Ticks, DateTimeKind.Unspecified)))
+        {
+            value = value.AddHours(1);
+        }
+
+        if (value.Kind == DateTimeKind.Local)
+        {
+            value = TimeZoneInfo.ConvertTimeToUtc(new DateTime(value.Ticks, DateTimeKind.Unspecified), timeZone);
+        }
+
+        if (value.Kind == DateTimeKind.Unspecified)
+        {
+            value = new DateTime(value.Ticks, DateTimeKind.Utc); //Assume it's utc
+        }
+
+        if (value.Kind == DateTimeKind.Utc)
+        {
+            UtcTime = value; //Set UTC time
+            TimeZoneOffset = timeZone.GetUtcOffset(value);
+        }
+    }
+
+    private static TimeZoneInfo GetTimeZoneInfo(TenantManager tenantManager)
+    {
+        return TimeZoneConverter.GetTimeZone(tenantManager.GetCurrentTenant().TimeZone);
+    }
+
+    private string ToRoundTripString(DateTime date, TimeSpan offset)
+    {
+        var dateString = date.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fffffff", CultureInfo.InvariantCulture);
+        var offsetString = offset.Ticks == 0
+            ? "Z" : (offset < TimeSpan.Zero
+            ? "-" : "+") + offset.ToString("hh\\:mm", CultureInfo.InvariantCulture);
+
+        return dateString + offsetString;
+    }
+
+    public static ApiDateTime FromDate(TenantManager tenantManager, DateTime d)
+    {
+        var date = new ApiDateTime(tenantManager, d);
+
+        return date;
+    }
+
+    public static ApiDateTime FromDate(TenantManager tenantManager, DateTime? d)
+    {
+        if (d.HasValue)
+        {
+            var date = new ApiDateTime(tenantManager, d);
+
+            return date;
+        }
+
+        return null;
+    }
+
+    public static bool operator >(ApiDateTime left, ApiDateTime right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return false;
+        }
+        if (left == null)
+        {
+            return false;
+        }
+
+        return left.CompareTo(right) > 0;
+    }
+
+    public static bool operator >=(ApiDateTime left, ApiDateTime right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return false;
+        }
+        if (left == null)
+        {
+            return false;
+        }
+
+        return left.CompareTo(right) >= 0;
+    }
+
+    public static bool operator <=(ApiDateTime left, ApiDateTime right)
+    {
+        return !(left >= right);
+    }
+
+    public static bool operator <(ApiDateTime left, ApiDateTime right)
+    {
+        return !(left > right);
+    }
+
+    public static bool operator ==(ApiDateTime left, ApiDateTime right)
+    {
+        return Equals(left, right);
+    }
+
+    public static bool operator !=(ApiDateTime left, ApiDateTime right)
+    {
+        return !(left == right);
+    }
+
+    public static implicit operator DateTime(ApiDateTime d)
+    {
+        if (d == null)
+        {
+            return DateTime.MinValue;
+        }
+
+        return d.UtcTime;
+    }
+
+    public static implicit operator DateTime?(ApiDateTime d)
+    {
+        if (d == null)
+        {
+            return null;
+        }
+
+        return d.UtcTime;
+    }
+
+    public int CompareTo(DateTime other)
+    {
+        return CompareTo(new ApiDateTime(_tenantManager, other));
+    }
+
+    public int CompareTo(ApiDateTime other)
+    {
+        if (other == null)
+        {
+            return 1;
+        }
+
+        return UtcTime.CompareTo(other.UtcTime);
+    }
+
+    public override bool Equals(object obj)
+    {
+        if (obj is null)
+        {
+            return false;
+        }
+
+        if (ReferenceEquals(this, obj))
+        {
+            return true;
+        }
+
+        if (obj is not ApiDateTime time)
+        {
+            return false;
+        }
+
+        return Equals(time);
+    }
+
+    public bool Equals(ApiDateTime other)
+    {
+        if (other is null)
+        {
+            return false;
+        }
+        if (ReferenceEquals(this, other))
+        {
+            return true;
+        }
+
+        return UtcTime.Equals(other.UtcTime) && TimeZoneOffset.Equals(other.TimeZoneOffset);
+    }
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            return UtcTime.GetHashCode() * 397 + TimeZoneOffset.GetHashCode();
+        }
+    }
+
+    public int CompareTo(object obj)
+    {
+        if (obj is DateTime dateTime)
+        {
+            return CompareTo(dateTime);
+        }
+
+        return obj is ApiDateTime apiDateTime ? CompareTo(apiDateTime) : 0;
+    }
+
+    public override string ToString()
+    {
+        var localUtcTime = UtcTime;
+        if (!UtcTime.Equals(DateTime.MinValue))
+        {
+            localUtcTime = UtcTime.Add(TimeZoneOffset);
+        }
+
+        return ToRoundTripString(localUtcTime, TimeZoneOffset);
+    }
+
+    public static ApiDateTime GetSample()
+    {
+        return new ApiDateTime(DateTime.UtcNow, TimeSpan.Zero);
+    }
+}
+
+public class ApiDateTimeTypeConverter : DateTimeConverter
+{
+    public override object ConvertTo(ITypeDescriptorContext context, CultureInfo culture, object value, Type destinationType)
+    {
+        if (destinationType == typeof(string))
+        {
+            return value.ToString();
+        }
+
+        return base.ConvertTo(context, culture, value, destinationType);
+    }
+
+    public override object ConvertFrom(ITypeDescriptorContext context, CultureInfo culture, object value)
+    {
+        if (value is string @string)
+        {
+            return ApiDateTime.Parse(@string, null);
+        }
+        if (value is DateTime time)
+        {
+            return new ApiDateTime(null, time);
+        }
+
+        return base.ConvertFrom(context, culture, value);
+    }
+}
+
+public class ApiDateTimeConverter : JsonConverter<ApiDateTime>
+{
+    public override ApiDateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (DateTimeOffset.TryParse(reader.GetString(), out var offset))
+        {
+            return new ApiDateTime(offset.UtcDateTime, offset.Offset);
+        }
+
+        if (DateTime.TryParseExact(reader.GetString(), ApiDateTime.Formats,
+                CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var dateTime))
+        {
+            return new ApiDateTime(dateTime, TimeSpan.Zero);
+        }
+
+        if (reader.TryGetDateTime(out var result))
+        {
+            return new ApiDateTime(result, TimeSpan.Zero);
+        }
+
+        return new ApiDateTime();
+    }
+
+    public override void Write(Utf8JsonWriter writer, ApiDateTime value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+[Scope]
+public class ApiDateTimeHelper(TenantManager tenantManager)
+{
+    public ApiDateTime Get(DateTime? from)
+    {
+        return ApiDateTime.FromDate(tenantManager, from);
+    }
+}

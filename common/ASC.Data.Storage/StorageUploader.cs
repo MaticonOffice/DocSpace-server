@@ -1,0 +1,227 @@
+﻿// Copyright (C) Ascensio System SIA, 2009-2026
+// 
+// This program is a free software product. You can redistribute it and/or
+// modify it under the terms of the GNU Affero General Public License (AGPL)
+// version 3 as published by the Free Software Foundation, together with the
+// additional terms provided in the LICENSE file.
+// 
+// This program is distributed WITHOUT ANY WARRANTY, without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. For
+// details, see the GNU AGPL at: https://www.gnu.org/licenses/agpl-3.0.html
+// 
+// You can contact Maticon Office LLC by email at info@maticonoffice.ru
+// or by postal mail at Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia,
+// Office 1840, Premises 4/45, 12 Presnenskaya Embankment, Moscow, 123112, Russia.
+// 
+// The interactive user interfaces in modified versions of the Program
+// are required to display Appropriate Legal Notices in accordance with
+// Section 5 of the GNU AGPL version 3.
+// 
+// No trademark rights are granted under this License.
+// 
+// All non-code elements of the Product, including illustrations,
+// icon sets, and technical writing content, are licensed under the
+// Creative Commons Attribution-ShareAlike 4.0 International License:
+// https://creativecommons.org/licenses/by-sa/4.0/legalcode
+// 
+// This license applies only to such non-code elements and does not
+// modify or replace the licensing terms applicable to the Program's
+// source code, which remains licensed under the GNU Affero General
+// Public License v3.
+// 
+// SPDX-License-Identifier: AGPL-3.0-only
+
+namespace ASC.Data.Storage;
+
+[Singleton]
+public class StorageUploader(
+    IServiceProvider serviceProvider,
+    TempStream tempStream,
+    ICacheNotify<MigrationProgress> cacheMigrationNotify,
+    IDistributedTaskQueueFactory queueFactory,
+    ILogger<StorageUploader> logger,
+    IDistributedLockProvider distributedLockProvider,
+    IFusionCache cache)
+{
+    private readonly DistributedTaskQueue<MigrateOperation> _queue = queueFactory.CreateQueue<MigrateOperation>();
+
+    public async Task StartAsync(int tenantId, StorageSettings newStorageSettings, StorageFactoryConfig storageFactoryConfig)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync($"lock_{_queue.Name}"))
+        {
+            var id = GetCacheKey(tenantId);
+
+            if ((await _queue.GetAllTasks()).Any(x => x.Id == id))
+            {
+                return;
+            }
+
+            var migrateOperation = new MigrateOperation(serviceProvider, cacheMigrationNotify, id, tenantId, newStorageSettings, storageFactoryConfig, tempStream, logger, cache);
+            await _queue.EnqueueTask(migrateOperation);
+        }
+    }
+
+    public async Task<MigrateOperation> GetProgressAsync(int tenantId)
+    {
+        await using (await distributedLockProvider.TryAcquireLockAsync($"lock_{_queue.Name}"))
+        {
+            return await _queue.PeekTask(GetCacheKey(tenantId));
+        }
+    }
+
+    public async Task Stop()
+    {
+        foreach (var task in (await _queue.GetAllTasks(DistributedTaskQueue<MigrateOperation>.INSTANCE_ID)).Where(r => r.Status == DistributedTaskStatus.Running))
+        {
+            await _queue.DequeueTask(task.Id);
+        }
+    }
+
+    private static string GetCacheKey(int tenantId)
+    {
+        return typeof(MigrateOperation).FullName + tenantId;
+    }
+}
+
+[Transient]
+public class MigrateOperation : DistributedTaskProgress
+{
+    private static readonly string _configPath;
+    private readonly ILogger<StorageUploader> _logger;
+    private readonly IEnumerable<string> _modules;
+    private readonly StorageSettings _settings;
+    private readonly int _tenantId;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly StorageFactoryConfig _storageFactoryConfig;
+    private readonly TempStream _tempStream;
+    private readonly IFusionCache _cache;
+    private readonly ICacheNotify<MigrationProgress> _cacheMigrationNotify;
+
+    static MigrateOperation()
+    {
+        _configPath = string.Empty;
+    }
+
+    public MigrateOperation()
+    {
+
+    }
+
+    public MigrateOperation(
+        IServiceProvider serviceProvider,
+        ICacheNotify<MigrationProgress> cacheMigrationNotify,
+        string id,
+        int tenantId,
+        StorageSettings settings,
+        StorageFactoryConfig storageFactoryConfig,
+        TempStream tempStream,
+        ILogger<StorageUploader> logger,
+        IFusionCache cache)
+    {
+        Id = id;
+        Status = DistributedTaskStatus.Created;
+
+        _serviceProvider = serviceProvider;
+        _cacheMigrationNotify = cacheMigrationNotify;
+        _tenantId = tenantId;
+        _settings = settings;
+        _storageFactoryConfig = storageFactoryConfig;
+        _tempStream = tempStream;
+        _modules = storageFactoryConfig.GetModuleList(_configPath, true);
+        StepCount = _modules.Count();
+        _logger = logger;
+        _cache = cache;
+    }
+
+    public object Clone()
+    {
+        return MemberwiseClone();
+    }
+
+    protected override async Task DoJob()
+    {
+        try
+        {
+            _logger.DebugTenant(_tenantId);
+            Status = DistributedTaskStatus.Running;
+
+            await using var scope = _serviceProvider.CreateAsyncScope();
+            var scopeClass = scope.ServiceProvider.GetService<MigrateOperationScope>();
+            var (tenantManager, securityContext, storageFactory, options, storageSettingsHelper, settingsManager) = scopeClass;
+            var tenant = await tenantManager.GetTenantAsync(_tenantId);
+            tenantManager.SetCurrentTenant(tenant);
+
+            await securityContext.AuthenticateMeWithoutCookieAsync(tenant.OwnerId);
+
+            foreach (var module in _modules)
+            {
+                var oldStore = await storageFactory.GetStorageAsync(_tenantId, module);
+                var store = await storageFactory.GetStorageFromConsumerAsync(_tenantId, module, await storageSettingsHelper.DataStoreConsumerAsync(_settings));
+                var domains = _storageFactoryConfig.GetDomainList(module).ToList();
+
+                var crossModuleTransferUtility = new CrossModuleTransferUtility(options, _tempStream, oldStore, store, _cache);
+
+                string[] files;
+                foreach (var domain in domains)
+                {
+                    //Status = module + domain;
+                    _logger.DebugDomain(domain);
+                    files = await oldStore.ListFilesRelativeAsync(domain, "\\", "*", true).ToArrayAsync();
+
+                    foreach (var file in files)
+                    {
+                        _logger.DebugFile(file);
+                        await crossModuleTransferUtility.CopyFileAsync(domain, file, domain, file);
+                    }
+                }
+
+                files = (await oldStore.ListFilesRelativeAsync(string.Empty, "\\", "*", true).ToArrayAsync())
+                .Where(path => domains.TrueForAll(domain => !path.Contains(domain + "/")))
+                .ToArray();
+
+                foreach (var file in files)
+                {
+                    _logger.DebugFile(file);
+                    await crossModuleTransferUtility.CopyFileAsync("", file, "", file);
+                }
+
+                await StepDone();
+
+                await MigrationPublishAsync();
+            }
+
+            await settingsManager.SaveAsync(_settings);
+            tenant.SetStatus(TenantStatus.Active);
+            await tenantManager.SaveTenantAsync(tenant);
+
+            Status = DistributedTaskStatus.Completed;
+        }
+        catch (Exception e)
+        {
+            Status = DistributedTaskStatus.Failted;
+            Exception = e;
+            _logger.ErrorMigrateOperation(e);
+        }
+
+        await MigrationPublishAsync();
+    }
+
+    private async Task MigrationPublishAsync()
+    {
+        await _cacheMigrationNotify.PublishAsync(new MigrationProgress
+        {
+            TenantId = _tenantId,
+            Progress = Percentage,
+            Error = Exception.ToString(),
+            IsCompleted = IsCompleted
+        }, CacheNotifyAction.Insert);
+    }
+}
+
+public record MigrateOperationScope(
+    TenantManager TenantManager,
+    SecurityContext SecurityContext,
+    StorageFactory StorageFactory,
+    ILogger<MigrateOperationScope> Options,
+    StorageSettingsHelper StorageSettingsHelper,
+    SettingsManager SettingsManager);
