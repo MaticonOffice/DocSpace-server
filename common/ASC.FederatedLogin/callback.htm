@@ -1,0 +1,19 @@
+﻿<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<html>
+<head>
+    <script language="javascript" type="text/javascript">
+        if (%DESKTOP%) {
+			localStorage.setItem("profile", %PROFILE%);
+			window.location.href = "/";
+        } else {
+            try {
+                window.opener.%CALLBACK%(%PROFILE%);
+            }
+            catch (ex) {
+            }
+            window.close();
+        }
+    </script>
+</head>
+<body></body>
+</html>
